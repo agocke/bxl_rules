@@ -199,7 +199,7 @@ const [outArt] = ctx.actions.run({
     description: "compile: MyLib"
 });
 
-// outArt.isBound === true; Rules.getFile(outArt) is the produced DerivedFile
+// outArt.kind === "bound"; Rules.getFile(outArt) is the produced DerivedFile
 ```
 
 You can't pass raw paths as outputs — only `OutputArtifact` instances obtained from `Rules.asOutput(declaredArtifact)`. This ensures the framework controls output placement, prevents collisions between targets, and tracks bind/unbound state. Likewise, command-line construction goes through `Rules.cmdInput` / `Rules.cmdOutput` so rule code never touches the `@internal` `Artifact.path` field.
@@ -215,16 +215,18 @@ An **Artifact** is the unit rule code passes around when wiring inputs and outpu
 There are three types, all branded so a bare object literal can't accidentally satisfy them:
 
 ```typescript
+type ArtifactKind = "unbound" | "bound" | "source";
+
 interface Artifact {                       // referenceable handle; may be unbound
     shortPath: string;                     // user-visible logical name
     extension: string;                     // ".dll", "" if none
-    isSource: boolean;
-    isBound: boolean;
+    kind: ArtifactKind;                    // "unbound" | "bound" | "source"
     path: Path;                            // @internal — SDK adapters only; use Rules.cmdInput / cmdOutput
     boundFile?: DerivedFile;               // populated after Actions.run binds it
 }
 
 interface SourceArtifact extends Artifact { // wraps a workspace File; always bound
+    kind: "source";                        // narrowed discriminator
     file: File;
 }
 
@@ -233,15 +235,17 @@ interface OutputArtifact {                  // single-use binding handle
 }
 ```
 
+`kind` is a string-literal discriminator (not paired booleans) so the day DScript narrows discriminated unions reliably, redefining `type Artifact = UnboundArtifact | BoundArtifact | SourceArtifact` — each variant pinning `kind` to a single literal — is a near-trivial change. Today the checker doesn't narrow on field values, so the bound/unbound precondition on `getFile`, `bindArtifact`, and `asOutput` is still enforced by `Contract.requires(...)` rather than statically.
+
 **The lifecycle:** declare → bind → reference.
 
 ```typescript
-const art = ctx.actions.declareOutput("foo.dll");   // Artifact, isBound: false
+const art = ctx.actions.declareOutput("foo.dll");   // Artifact, kind: "unbound"
 const [bound] = ctx.actions.run({                    // bind via Actions.run
     outputs: [Rules.asOutput(art)],                  // single-use OutputArtifact
     ...
 });
-// bound.isBound === true, bound.boundFile is the produced DerivedFile
+// bound.kind === "bound", bound.boundFile is the produced DerivedFile
 ```
 
 **Source files** entering through label resolution are wrapped in `SourceArtifact` automatically by the framework (the `LabelResolver` returns `SourceArtifact`, not raw `File`):
@@ -260,7 +264,7 @@ resolve: (attrs, resolver) => ({
 - `Rules.declareArtifact(targetDir, name, opts?)` — low-level factory (rule code uses `ctx.actions.declareOutput` instead).
 - `Rules.sourceArtifact(file)` — wrap a workspace `File`.
 - `Rules.asOutput(art)` — project an Artifact to its single-use binding handle. Rejects `SourceArtifact`s.
-- `Rules.getFile(art)` — extract the underlying `File`/`DerivedFile`. Asserts `isBound`.
+- `Rules.getFile(art)` — extract the underlying `File`/`DerivedFile`. Asserts `kind !== "unbound"`.
 - `Rules.cmdInput(art)` — build a command-line input value. Wraps `Sdk.Transformers.Artifact.input(getFile(art))`.
 - `Rules.cmdOutput(out)` — build a command-line output value. Wraps `Sdk.Transformers.Artifact.output(out.artifact.path)`; this is the *only* sanctioned reader of `Artifact.path` outside the SDK adapters.
 - `Rules.bindArtifact(unbound, derivedFile)` — internal; the Actions adapter calls this. Most rule code does not.

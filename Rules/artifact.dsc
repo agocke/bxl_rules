@@ -28,12 +28,31 @@ import {Artifact as Tx} from "Sdk.Transformers";
  * Type taxonomy
  * -------------
  *   Artifact         — base, branded. Carries `shortPath`, `extension`,
- *                      `isSource`, `isBound`, and the underlying `Path`.
- *   SourceArtifact   — extends Artifact; wraps a workspace `File`. Always
- *                      `isSource = true` and `isBound = true`. May not be
- *                      passed to `asOutput`.
+ *                      `kind` (one of "unbound" | "bound" | "source"),
+ *                      and the underlying `Path`.
+ *   SourceArtifact   — extends Artifact; wraps a workspace `File`. Has
+ *                      `kind === "source"`. May not be passed to
+ *                      `asOutput`.
  *   OutputArtifact   — binding handle; holds the `Artifact` it backs.
  *                      Carry semantics: feed to an action's `outputs`.
+ *
+ * Why a `kind` discriminator (not paired booleans)
+ * ------------------------------------------------
+ * Bound vs unbound is *value-level* state — a freshly declared output is
+ * unbound; the value returned from `Actions.run` is the same logical
+ * output but bound. DScript's checker does not yet narrow union types
+ * based on a field's runtime value (the way TypeScript narrows a
+ * discriminated union inside an `if (x.kind === "bound")` block), so
+ * `getFile` / `bindArtifact` / `asOutput` continue to enforce
+ * preconditions through `Contract.requires(...)` rather than via
+ * static narrowing. The shape, however, is forward-compatible: the
+ * day DScript narrows discriminated unions, redefining
+ *
+ *     type Artifact = UnboundArtifact | BoundArtifact | SourceArtifact;
+ *
+ * (where each variant pins `kind` to a single literal) becomes a
+ * near-trivial change — the `kind` field is already the discriminant
+ * the union would pivot on, and call sites already branch on it.
  *
  * Drift hazard avoidance
  * ----------------------
@@ -56,6 +75,23 @@ import {Artifact as Tx} from "Sdk.Transformers";
 // ============================================================================
 //  Artifact — referenceable handle
 // ============================================================================
+
+/**
+ * Discriminator for the three Artifact states.
+ *
+ *   "unbound" — declared output, no producing action registered yet.
+ *   "bound"   — declared output with a registered producing action;
+ *               `boundFile` is populated.
+ *   "source"  — wraps an existing workspace `File`; the `SourceArtifact`
+ *               narrows `kind` to this single literal.
+ *
+ * This is a string-literal union rather than a `boolean` pair so that
+ * a future static discriminated-union refactor (UnboundArtifact |
+ * BoundArtifact | SourceArtifact) is a near-trivial change — the
+ * discriminant is already in place and call sites already pivot on it.
+ */
+@@public
+export type ArtifactKind = "unbound" | "bound" | "source";
 
 /**
  * A referenceable handle to a file or directory in the build graph.
@@ -88,16 +124,21 @@ export interface Artifact {
     /** File extension including the dot (e.g. ".dll"); empty if none. */
     extension: string;
 
-    /** True iff backed by an existing workspace source file. */
-    isSource: boolean;
-
     /**
-     * True iff a producing action has been registered for this Artifact.
-     * Always true for `SourceArtifact`. For declared outputs, Wave A
-     * leaves this `false`; Wave B will produce a `bound` projection
-     * after action registration.
+     * Discriminator: "unbound" | "bound" | "source".
+     *
+     *   - "unbound": freshly declared output; no producing action yet.
+     *     `getFile` will reject; pass to `Actions.run` (via `asOutput`)
+     *     to produce a bound version.
+     *   - "bound":   declared output with a registered producing action.
+     *     `boundFile` is populated; `getFile` returns it.
+     *   - "source":  wraps a workspace source file. `SourceArtifact`
+     *                narrows this field to the single literal "source".
+     *
+     * See `ArtifactKind` for the rationale behind a discriminator field
+     * over the older paired-boolean (`isSource`/`isBound`) shape.
      */
-    isBound: boolean;
+    kind: ArtifactKind;
 
     /**
      * Underlying BuildXL `Path`. **@internal — SDK adapters only.**
@@ -132,9 +173,9 @@ export interface Artifact {
  * An artifact that wraps an existing workspace source file.
  *
  * `SourceArtifact` extends `Artifact` with the bound `File` handle and
- * its own brand. `isSource` is always `true` and `isBound` is always
- * `true`; this is the only Artifact subtype for which `isBound` is
- * statically known.
+ * its own brand. `kind` is narrowed to the single literal `"source"`;
+ * this is the only Artifact subtype whose binding state is statically
+ * known at the type level.
  *
  * Always construct via `sourceArtifact(file)`.
  */
@@ -142,6 +183,9 @@ export interface Artifact {
 export interface SourceArtifact extends Artifact {
     /** Tagged-interface brand. Do not set or read. */
     __sourceArtifactBrand: any;
+
+    /** Narrowed discriminator — always `"source"` for SourceArtifact. */
+    kind: "source";
 
     /** The bound source `File` this artifact wraps. */
     file: File;
@@ -202,8 +246,8 @@ export interface DeclareArtifactOpts {
  *
  * `targetDir` is normally the rule's output directory
  * (`Context.getNewOutputDirectory(targetName)` in the current Actions
- * impl). The returned Artifact has `isSource = false` and `isBound =
- * false` until Wave B wires its producing action.
+ * impl). The returned Artifact has `kind === "unbound"` until a
+ * producing action is registered (typically by `Actions.run`).
  */
 @@public
 export function declareArtifact(targetDir: Directory, name: string, opts?: DeclareArtifactOpts): Artifact {
@@ -219,8 +263,7 @@ export function declareArtifact(targetDir: Directory, name: string, opts?: Decla
         __artifactBrand: undefined,
         shortPath: short,
         extension: ext,
-        isSource: false,
-        isBound: false,
+        kind: "unbound",
         path: fullPath,
         boundFile: undefined,
     };
@@ -245,8 +288,7 @@ export function sourceArtifact(file: File): SourceArtifact {
         __sourceArtifactBrand: undefined,
         shortPath: short,
         extension: ext,
-        isSource: true,
-        isBound: true,
+        kind: "source",
         path: fpath,
         boundFile: undefined,
         file: file,
@@ -269,7 +311,7 @@ export function sourceArtifact(file: File): SourceArtifact {
 @@public
 export function asOutput(art: Artifact): OutputArtifact {
     Contract.requires(art !== undefined, "asOutput: artifact must not be undefined");
-    Contract.requires(!art.isSource,
+    Contract.requires(art.kind !== "source",
         "asOutput: a SourceArtifact cannot be used as an action output");
     return <OutputArtifact>{
         __outputArtifactBrand: undefined,
@@ -313,32 +355,29 @@ export function outputArtifactsEqual(a: OutputArtifact, b: OutputArtifact): bool
 // ============================================================================
 
 /**
- * Produce a *new* Artifact with `isBound = true` and the supplied bound
- * file attached. The original `unbound` value is unmodified (DScript
- * values are immutable); callers should treat the result as the new
- * canonical handle.
+ * Produce a *new* Artifact with `kind === "bound"` and the supplied
+ * bound file attached. The original `unbound` value is unmodified
+ * (DScript values are immutable); callers should treat the result as
+ * the new canonical handle.
  *
  * Intended use: `Actions.run` and friends call this once per declared
  * output after `Transformer.execute` returns the produced files. Most
  * rule code does not call `bindArtifact` directly.
  *
- * Asserts that `unbound.isBound` is false; rebinding an already-bound
- * Artifact is a programming error.
+ * Asserts that `unbound.kind === "unbound"`; rebinding an already-bound
+ * Artifact (or a source) is a programming error.
  */
 @@public
 export function bindArtifact(unbound: Artifact, file: DerivedFile): Artifact {
     Contract.requires(unbound !== undefined, "bindArtifact: artifact must not be undefined");
-    Contract.requires(!unbound.isBound,
-        "bindArtifact: artifact is already bound; cannot rebind");
-    Contract.requires(!unbound.isSource,
-        "bindArtifact: source artifacts are bound at construction; do not bind manually");
+    Contract.requires(unbound.kind === "unbound",
+        "bindArtifact: artifact must be unbound (kind === 'unbound'); sources are bound at construction and bound outputs cannot be rebound");
     Contract.requires(file !== undefined, "bindArtifact: file must not be undefined");
     return <Artifact>{
         __artifactBrand: undefined,
         shortPath: unbound.shortPath,
         extension: unbound.extension,
-        isSource: false,
-        isBound: true,
+        kind: "bound",
         path: unbound.path,
         boundFile: file,
     };
@@ -347,8 +386,9 @@ export function bindArtifact(unbound: Artifact, file: DerivedFile): Artifact {
 /**
  * Extract the underlying `File` (or `DerivedFile`) for a *bound* Artifact.
  *
- * For `SourceArtifact`, returns the wrapped `.file`. For a derived
- * (declared + bound) Artifact, returns `.boundFile`. Asserts `isBound`.
+ * For `SourceArtifact` (`kind === "source"`), returns the wrapped
+ * `.file`. For a bound derived Artifact (`kind === "bound"`), returns
+ * `.boundFile`. Rejects `kind === "unbound"`.
  *
  * This is the bridge from Artifact-typed rule code into the underlying
  * BuildXL pip graph (e.g. when assembling `Transformer.execute`'s
@@ -357,9 +397,9 @@ export function bindArtifact(unbound: Artifact, file: DerivedFile): Artifact {
 @@public
 export function getFile(art: Artifact): File {
     Contract.requires(art !== undefined, "getFile: artifact must not be undefined");
-    Contract.requires(art.isBound,
+    Contract.requires(art.kind !== "unbound",
         "getFile: artifact is not bound (no producing action has been registered)");
-    if (art.isSource) {
+    if (art.kind === "source") {
         return (<SourceArtifact>art).file;
     }
     Contract.requires(art.boundFile !== undefined,

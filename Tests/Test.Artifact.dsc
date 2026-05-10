@@ -24,10 +24,8 @@ function test_declareArtifact_basic(): string {
         "declareArtifact(name) must set shortPath = name");
     Contract.assert(art.extension === ".dll",
         `extension must be ".dll" for "MyLib.dll", got "${art.extension}"`);
-    Contract.assert(art.isSource === false,
-        "declared artifact must have isSource = false");
-    Contract.assert(art.isBound === false,
-        "declared artifact (Wave A) must have isBound = false");
+    Contract.assert(art.kind === "unbound",
+        `declared artifact must have kind === "unbound"; got "${art.kind}"`);
 
     return "ok";
 }
@@ -95,10 +93,8 @@ function test_sourceArtifact_basic(): string {
     const f = f`Test.Artifact.dsc`;
     const src = Rules.sourceArtifact(f);
 
-    Contract.assert(src.isSource === true,
-        "sourceArtifact must have isSource = true");
-    Contract.assert(src.isBound === true,
-        "sourceArtifact must have isBound = true (always bound)");
+    Contract.assert(src.kind === "source",
+        `sourceArtifact must have kind === "source"; got "${src.kind}"`);
     Contract.assert(src.file === f,
         "sourceArtifact must carry the original File reference");
     Contract.assert(src.shortPath === "Test.Artifact.dsc",
@@ -157,8 +153,8 @@ function test_sourceArtifact_isUsableAsArtifact(): string {
     // If SourceArtifact does not extend Artifact, this assignment fails to type-check.
     const asBase: Rules.Artifact = src;
 
-    Contract.assert(asBase.isSource === true,
-        "SourceArtifact widened to Artifact must retain isSource = true");
+    Contract.assert(asBase.kind === "source",
+        `SourceArtifact widened to Artifact must retain kind === "source"; got "${asBase.kind}"`);
 
     return "ok";
 }
@@ -215,7 +211,7 @@ function test_artifactsEqual_undefinedReturnsFalse(): string {
 
 function test_artifactsEqual_sourceVsDeclaredAtSamePathWouldBeEqual(): string {
     // Document the chosen semantics: artifactsEqual compares paths only,
-    // not isSource. (That is, two artifacts at the same logical location
+    // not kind. (That is, two artifacts at the same logical location
     // are equal regardless of provenance — useful for graph dedup.)
     const src = Rules.sourceArtifact(f`Test.Artifact.dsc`);
     const src2 = Rules.sourceArtifact(f`Test.Artifact.dsc`);
@@ -313,7 +309,7 @@ function test_getFile_returnsBoundFile_forDerived(): string {
     const df = Transformer.writeAllLines(declared.path, ["hello"]);
     const bound = Rules.bindArtifact(declared, <DerivedFile>df);
 
-    Contract.assert(bound.isBound === true, "bindArtifact must produce a bound Artifact");
+    Contract.assert(bound.kind === "bound", `bindArtifact must produce kind === "bound"; got "${bound.kind}"`);
     Contract.assert(bound.boundFile === df, "bindArtifact must attach the supplied DerivedFile");
 
     const out = Rules.getFile(bound);
@@ -330,7 +326,7 @@ function test_getFile_returnsBoundFile_forDerived(): string {
 function test_cmdInput_returnsDefinedForSource(): string {
     // We can't introspect the BuildXL Artifact value (it's opaque), but
     // we can confirm the helper accepts a SourceArtifact and returns
-    // something defined (i.e. doesn't throw the getFile isBound check
+    // something defined (i.e. doesn't throw the getFile kind check
     // and doesn't return undefined).
     const src = Rules.sourceArtifact(f`Test.Artifact.dsc`);
     const arg = Rules.cmdInput(src);

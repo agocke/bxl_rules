@@ -170,7 +170,7 @@ export interface Actions {
      *
      * The framework decides where the file goes — the rule author only
      * specifies the filename (and optional `subdir` for organisation).
-     * The returned Artifact is `isBound = false`; pass `Rules.asOutput(art)`
+     * The returned Artifact has `kind === "unbound"`; pass `Rules.asOutput(art)`
      * to one of the action methods below to bind it.
      */
     declareOutput(name: string, opts?: DeclareArtifactOpts): Artifact;
@@ -182,7 +182,7 @@ export interface Actions {
      * via `Rules.asOutput(declaredArtifact)`; raw paths cannot be passed.
      *
      * Returns the bound Artifacts in the same order as `outputs`. Each
-     * returned Artifact has `isBound = true` and a populated `boundFile`;
+     * returned Artifact has `kind === "bound"` and a populated `boundFile`;
      * downstream rules should use these (not the unbound originals)
      * when wiring dependencies.
      */

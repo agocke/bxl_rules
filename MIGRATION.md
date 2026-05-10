@@ -94,7 +94,7 @@ ctx.args.srcs.forEach(s => use(Rules.getFile(s)));  // unwrap to File when neede
 // or: s.file (typed File, no Contract guard)
 ```
 
-The framework wraps every resolved label in a `SourceArtifact` so that rule code uniformly speaks in `Artifact`s. To bridge to a BuildXL primitive that wants a raw `File`, call `Rules.getFile(art)` (asserts `isBound`) or — for sources only — read `srcArt.file` directly.
+The framework wraps every resolved label in a `SourceArtifact` so that rule code uniformly speaks in `Artifact`s. To bridge to a BuildXL primitive that wants a raw `File`, call `Rules.getFile(art)` (asserts `art.kind !== "unbound"`) or — for sources only — read `srcArt.file` directly.
 
 ## 4. Declaring outputs
 
@@ -112,7 +112,7 @@ const outFile: File = out;                                // already a File
 **After** — `declareOutput` returns an unbound `Artifact`; wrap with `asOutput` for the action; consume the bound `Artifact` returned by `run`:
 
 ```typescript
-const out      = ctx.actions.declareOutput("foo.dll");    // Artifact, isBound: false
+const out      = ctx.actions.declareOutput("foo.dll");    // Artifact, kind: "unbound"
 const outHdl   = Rules.asOutput(out);                     // OutputArtifact (single-use)
 const [bound]  = ctx.actions.run({                        // returns Artifact[] (bound)
     outputs: [outHdl],
@@ -150,7 +150,7 @@ arguments: [
 ]
 ```
 
-Why: `Artifact.path` is now `@internal`. The `Rules.cmd*` helpers are the only sanctioned readers outside the SDK adapters. They also carry through the `getFile`-style `isBound` Contract check on inputs.
+Why: `Artifact.path` is now `@internal`. The `Rules.cmd*` helpers are the only sanctioned readers outside the SDK adapters. They also carry through the `getFile`-style `kind !== "unbound"` Contract check on inputs.
 
 You can still import `{Cmd}` from `Sdk.Transformers` directly — `Cmd.argument`, `Cmd.option`, etc. are unchanged.
 
