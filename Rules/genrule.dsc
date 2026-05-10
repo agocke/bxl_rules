@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import {Artifact, Cmd, Transformer} from "Sdk.Transformers";
+import {Artifact as Tx, Cmd, Transformer} from "Sdk.Transformers";
 
 /**
  * genrule — run an arbitrary command and capture its declared outputs.
@@ -12,21 +12,22 @@ import {Artifact, Cmd, Transformer} from "Sdk.Transformers";
  *
  * Usage:
  *   import * as Rules from "Sdk.Rules";
+ *   import {Artifact, Cmd} from "Sdk.Transformers";
  *
  *   const generated = Rules.genrule({
  *       name: "codegen",
- *       srcs: [f`schema.proto`],
+ *       srcs: [Rules.sourceArtifact(f`schema.proto`)],
  *       outs: [a`schema.pb.cs`],
  *       tool: {
  *           exe: f`tools/protoc`,
  *       },
  *       cmd: (ctx) => [
- *           Cmd.argument(Artifact.input(ctx.srcs[0])),
- *           Cmd.option("--csharp_out=", Artifact.output(ctx.outs[0])),
+ *           Cmd.argument(Artifact.input(Rules.getFile(ctx.srcs[0]))),
+ *           Cmd.option("--csharp_out=", Artifact.output(ctx.outs[0].artifact.path)),
  *       ],
  *   });
  *
- *   // Use generated.getOutputFile(...)  or generated.outs[0] downstream.
+ *   // Use generated.outs[0] (a bound Artifact) downstream.
  */
 
 // ============================================================================
@@ -36,14 +37,20 @@ import {Artifact, Cmd, Transformer} from "Sdk.Transformers";
 /**
  * Context passed to the `cmd` callback so callers can reference the
  * resolved input/output artifacts without constructing paths manually.
+ *
+ * `srcs` mirrors the SourceArtifacts supplied in `GenruleArguments.srcs`.
+ * `outs` are `OutputArtifact` binding handles already projected from the
+ * declared Artifacts the SDK created for `GenruleArguments.outs` — pass
+ * each one's underlying `.artifact.path` to `Artifact.output(...)` for
+ * command-line use.
  */
 @@public
 export interface GenruleCmdContext {
-    /** The source files in the same order as `GenruleArguments.srcs`. */
-    srcs: File[];
+    /** The source artifacts in the same order as `GenruleArguments.srcs`. */
+    srcs: SourceArtifact[];
 
-    /** Output paths in the same order as `GenruleArguments.outs`. */
-    outs: Path[];
+    /** Output binding handles in the same order as `GenruleArguments.outs`. */
+    outs: OutputArtifact[];
 
     /** The output directory chosen for this rule. */
     outDir: Directory;
@@ -54,8 +61,8 @@ export interface GenruleArguments {
     /** Rule name — used to derive the output directory and for diagnostics. */
     name: string;
 
-    /** Input files the command reads. */
-    srcs?: File[];
+    /** Input source files the command reads. */
+    srcs?: SourceArtifact[];
 
     /** Output file names (atoms only — the directory is chosen automatically). */
     outs: PathAtom[];
@@ -67,12 +74,12 @@ export interface GenruleArguments {
      * Build the command-line arguments.
      *
      * Receives a `GenruleCmdContext` so you can reference resolved input
-     * and output artifacts without ever touching raw paths.
+     * and output artifacts without ever touching raw paths directly.
      *
      * Example:
      *   cmd: (ctx) => [
-     *       Cmd.argument(Artifact.input(ctx.srcs[0])),
-     *       Cmd.option("--out=", Artifact.output(ctx.outs[0])),
+     *       Cmd.argument(Artifact.input(Rules.getFile(ctx.srcs[0]))),
+     *       Cmd.option("--out=", Artifact.output(ctx.outs[0].artifact.path)),
      *   ]
      */
     cmd: (ctx: GenruleCmdContext) => Argument[];
@@ -101,8 +108,8 @@ export interface GenruleResult {
     /** The underlying Transformer.ExecuteResult for advanced use. */
     executeResult: Transformer.ExecuteResult;
 
-    /** The declared output files, in the same order as `outs`. */
-    outs: DerivedFile[];
+    /** The bound output artifacts, in the same order as `outs`. */
+    outs: Artifact[];
 
     /** Standard rule output info for composition with other rules. */
     defaultInfo: DefaultInfo;
@@ -116,11 +123,13 @@ export interface GenruleResult {
 @@public
 export function genrule(args: GenruleArguments): GenruleResult {
     const outDir = Context.getNewOutputDirectory(args.name);
-    const outPaths = args.outs.map(o => p`${outDir}/${o}`);
+    const srcs = args.srcs || [];
+    const declaredOuts = args.outs.map(name => declareArtifact(outDir, name.toString()));
+    const outputBindings = declaredOuts.map(a => asOutput(a));
 
     const ctx: GenruleCmdContext = {
-        srcs: args.srcs || [],
-        outs: outPaths,
+        srcs: srcs,
+        outs: outputBindings,
         outDir: outDir,
     };
 
@@ -129,22 +138,22 @@ export function genrule(args: GenruleArguments): GenruleResult {
         arguments: args.cmd(ctx),
         workingDirectory: d`${outDir}`,
         dependencies: [
-            ...(args.srcs || []),
+            ...srcs.map(s => s.file),
             ...(args.deps || []),
         ],
-        implicitOutputs: outPaths,
+        implicitOutputs: declaredOuts.map(a => a.path),
         environmentVariables: args.env,
         successExitCodes: args.successExitCodes,
         tags: args.tags,
         description: args.description || `genrule: ${args.name}`,
     });
 
-    const outs = outPaths.map(o => executeResult.getOutputFile(o));
+    const boundOuts = declaredOuts.map(a => bindArtifact(a, executeResult.getOutputFile(a.path)));
 
     return {
         executeResult: executeResult,
-        outs: outs,
-        defaultInfo: defaultInfo({ files: outs }),
+        outs: boundOuts,
+        defaultInfo: defaultInfo({ files: boundOuts.map(a => getFile(a)) }),
     };
 }
 
@@ -158,13 +167,13 @@ export interface FilegroupArguments {
     name: string;
 
     /** Files to include in the group. */
-    srcs: File[];
+    srcs: SourceArtifact[];
 }
 
 @@public
 export interface FilegroupResult {
-    /** The grouped files. */
-    srcs: File[];
+    /** The grouped artifacts. */
+    srcs: SourceArtifact[];
 
     /** Standard rule output info for composition with other rules. */
     defaultInfo: DefaultInfo;
@@ -180,7 +189,7 @@ export interface FilegroupResult {
 export function filegroup(args: FilegroupArguments): FilegroupResult {
     return {
         srcs: args.srcs,
-        defaultInfo: defaultInfo({ files: args.srcs }),
+        defaultInfo: defaultInfo({ files: args.srcs.map(s => s.file) }),
     };
 }
 
@@ -191,32 +200,46 @@ export function filegroup(args: FilegroupArguments): FilegroupResult {
 @@public
 export interface CopyFileArguments {
     name: string;
-    src: File;
-    /** Output file name (atom). If omitted, the source file name is used. */
+    src: Artifact;
+    /** Output file name (atom). If omitted, the source file's leaf name is used. */
     out?: PathAtom;
 }
 
 /**
- * Copy a single file to the output directory.
+ * Copy a single Artifact to the output directory. Returns a bound
+ * Artifact for downstream wiring.
  */
 @@public
-export function copy_file(args: CopyFileArguments): DerivedFile {
+export function copy_file(args: CopyFileArguments): Artifact {
     const outDir = Context.getNewOutputDirectory(args.name);
-    const outAtom = args.out || args.src.name;
-    return Transformer.copyFile(args.src, p`${outDir}/${outAtom}`);
+    const outName = args.out !== undefined ? args.out.toString() : args.src.path.name.toString();
+    const declared = declareArtifact(outDir, outName);
+    const sourceFile = getFile(args.src);
+    const f = Transformer.copyFile(sourceFile, declared.path);
+    // SAFETY: Transformer.copyFile is typed `File` but always produces a
+    // DerivedFile (the pip output). DScript casts are erased.
+    return bindArtifact(declared, <DerivedFile>f);
 }
 
 @@public
 export interface CopyFilesArguments {
     name: string;
-    srcs: File[];
+    srcs: Artifact[];
 }
 
 /**
- * Copy a set of files to a shared output directory, preserving file names.
+ * Copy a set of Artifacts to a shared output directory, preserving
+ * their leaf names. Returns bound Artifacts.
  */
 @@public
-export function copy_files(args: CopyFilesArguments): DerivedFile[] {
+export function copy_files(args: CopyFilesArguments): Artifact[] {
     const outDir = Context.getNewOutputDirectory(args.name);
-    return args.srcs.map(src => Transformer.copyFile(src, p`${outDir}/${src.name}`));
+    return args.srcs.map(src => {
+        const declared = declareArtifact(outDir, src.path.name.toString());
+        const sourceFile = getFile(src);
+        const f = Transformer.copyFile(sourceFile, declared.path);
+        // SAFETY: see copy_file above.
+        return bindArtifact(declared, <DerivedFile>f);
+    });
 }
+
