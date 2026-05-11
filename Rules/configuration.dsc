@@ -179,11 +179,46 @@ export function fromQualifier(q: Qualifier): Configuration {
  */
 @@public
 export function hostExecPlatform(): PlatformLabel {
+    return hostOs() + "-" + hostCpu();
+}
+
+/**
+ * Returns the host OS as a constraint value.
+ *
+ * Output domain: `"windows" | "macos" | "unix"` — matching BuildXL's
+ * own three-way `OsType` (`"win" | "macOS" | "unix"`), modulo the
+ * casing normalisation. BuildXL itself does not distinguish Linux,
+ * FreeBSD, OpenBSD, or any other Unix flavour — `getCurrentHost().os`
+ * returns `"unix"` for all of them. Callers that need finer
+ * granularity must override via the `os` qualifier axis explicitly
+ * (e.g. `bxl /q:os=freebsd;cpu=x64`), since the SDK can't detect what
+ * BuildXL won't tell it.
+ *
+ * Used by `ExecTransition` to populate the synthetic exec qualifier's
+ * `os` axis.
+ */
+@@public
+export function hostOs(): string {
     const host = Context.getCurrentHost();
-    const os = host.os === "win"   ? "windows"
-             : host.os === "macOS" ? "macos"
-             :                       "linux";
-    return os + "-" + host.cpuArchitecture;
+    return host.os === "win"   ? "windows"
+         : host.os === "macOS" ? "macos"
+         :                       "unix";
+}
+
+/**
+ * Returns the host CPU as a constraint value.
+ *
+ * Output domain: `"x64" | "x86"` — BuildXL's `cpuArchitecture` is
+ * statically that union, so `hostCpu()` will never return arm64.
+ * Workspaces targeting arm64 host machines must set `cpu` explicitly
+ * on the qualifier.
+ *
+ * Used by `ExecTransition` to populate the synthetic exec qualifier's
+ * `cpu` axis.
+ */
+@@public
+export function hostCpu(): string {
+    return Context.getCurrentHost().cpuArchitecture;
 }
 
 // ============================================================================
@@ -220,21 +255,52 @@ export function configurationsEqual(a: Configuration, b: Configuration): boolean
 //  Internal helpers
 // ============================================================================
 
-/** Best-effort platform derivation from common qualifier shapes. */
+/**
+ * Best-effort platform derivation. Three shapes are recognised, in
+ * priority order:
+ *
+ *   1. Independent `os` + `cpu` axes — the *Bazel-shaped* qualifier.
+ *      Synthesises a combined label `<os>-<cpu>` for diagnostics and
+ *      output-directory naming.
+ *   2. Combined `platform` field — the *legacy bundle* shape.
+ *   3. `targetRuntime` — older BuildXL conventions.
+ *
+ * Falling back to the host exec platform if none of the above are set.
+ *
+ * The combined `cfg.platform` is now a *derived convenience field*;
+ * the genuine independent dimensions live in `cfg.constraints` and
+ * should be queried via `getConstraint(cfg, ConstraintSettings.os)`
+ * and `getConstraint(cfg, ConstraintSettings.cpu)`.
+ */
 function derivePlatformFromQualifier(q: Qualifier): PlatformLabel {
-    const anyQ = <{platform?: string; targetRuntime?: string;}>q;
+    const anyQ = <{platform?: string; targetRuntime?: string; os?: string; cpu?: string;}>q;
+    if (anyQ.os !== undefined && anyQ.cpu !== undefined) return anyQ.os + "-" + anyQ.cpu;
     if (anyQ.platform      !== undefined) return anyQ.platform;
     if (anyQ.targetRuntime !== undefined) return anyQ.targetRuntime;
     return hostExecPlatform();
 }
 
-/** Best-effort constraint derivation from common qualifier shapes. */
+/**
+ * Best-effort constraint derivation. Each recognised axis on the
+ * qualifier becomes one `ConstraintEntry`:
+ *
+ *   qualifier.os            -> {setting: "os",   value: ...}
+ *   qualifier.cpu           -> {setting: "cpu",  value: ...}
+ *   qualifier.configuration -> {setting: "mode", value: ...}
+ *
+ * Workspaces using the legacy combined `platform` qualifier field can
+ * still match on "is this arm64?" by branching on `cfg.platform`
+ * directly, but the recommended shape is to declare `os` and `cpu` as
+ * independent axes so each is independently queryable via
+ * `getConstraint`.
+ */
 function deriveConstraintsFromQualifier(q: Qualifier): ConstraintEntry[] {
-    const anyQ = <{configuration?: string;}>q;
-    if (anyQ.configuration !== undefined) {
-        return [{setting: ConstraintSettings.mode, value: anyQ.configuration}];
-    }
-    return [];
+    const anyQ = <{os?: string; cpu?: string; configuration?: string;}>q;
+    let cs: ConstraintEntry[] = [];
+    if (anyQ.os            !== undefined) cs = cs.push({setting: ConstraintSettings.os,   value: anyQ.os});
+    if (anyQ.cpu           !== undefined) cs = cs.push({setting: ConstraintSettings.cpu,  value: anyQ.cpu});
+    if (anyQ.configuration !== undefined) cs = cs.push({setting: ConstraintSettings.mode, value: anyQ.configuration});
+    return cs;
 }
 
 /**

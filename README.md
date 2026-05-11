@@ -373,6 +373,50 @@ const dep = Rules.withConfiguration("//tools:codegen", execCfg);
 
 Two configured labels with the same string but different Configurations are distinct nodes in the dependency graph.
 
+**Bazel-platforms-style multi-axis qualifiers (recommended for new workspaces).** Bazel's platform system lets you `select()` on individual constraints (`@platforms//os:linux`, `@platforms//cpu:arm64`) rather than on combined platform names. You can get the same ergonomics here by declaring your workspace qualifier as independent axes — `os`, `cpu`, and `configuration` — instead of a single `platform: "linux-arm64"` field. `Rules.fromQualifier` understands both shapes; the multi-axis form additionally projects each axis as its own constraint, so `Rules.getConstraint(cfg, Rules.ConstraintSettings.cpu) === "arm64"` Just Works without substring-matching the combined platform string.
+
+Drop this into your top-level `config.dsc` (and adjust the union members to the OSes/CPUs your build actually supports):
+
+```typescript
+config({
+    resolvers: [ /* ... */ ],
+    qualifiers: {
+        defaultQualifier: { os: "linux", cpu: "x64", configuration: "debug" },
+        namedQualifiers: {
+            "linux-x64-debug":     { os: "linux",   cpu: "x64",   configuration: "debug"   },
+            "linux-x64-release":   { os: "linux",   cpu: "x64",   configuration: "release" },
+            "linux-arm64-release": { os: "linux",   cpu: "arm64", configuration: "release" },
+            "macos-arm64-debug":   { os: "macos",   cpu: "arm64", configuration: "debug"   },
+            "windows-x64-debug":   { os: "windows", cpu: "x64",   configuration: "debug"   },
+        },
+    },
+});
+```
+
+And in any module spec that needs to read the qualifier:
+
+```typescript
+export declare const qualifier: {
+    os:            "linux" | "macos" | "windows" | "freebsd";
+    cpu:           "x64"   | "x86"   | "arm64"   | "arm";
+    configuration: "debug" | "release";
+};
+
+const cfg = Rules.fromQualifier(qualifier);
+const isArm64 = Rules.getConstraint(cfg, Rules.ConstraintSettings.cpu) === "arm64";
+```
+
+`bxl /q:linux-arm64-release` (named) or `bxl /q:os=linux;cpu=arm64;configuration=release` (explicit) on the command line; `bxl` with no `/q:` uses the `defaultQualifier`.
+
+**One key difference from Bazel.** Bazel's `@platforms` workspace ships the canonical OS/CPU constraint values (`@platforms//os:linux`, etc.), and any platform target your project defines just references those labels. We can't ship the equivalent: BuildXL requires the qualifier *type* to be declared per-workspace as a union of string literals (so the engine can enumerate the build matrix), and there's no DScript syntax for an SDK to inject a type into your namespace. Hence the paste-once snippet above. The OS/CPU label vocabulary inside it is a soft convention — pick whatever values you like, just stay consistent across your modules.
+
+**Custom host labels for `ExecTransition`.** `Rules.ExecTransition` (the singleton) reports the host using BuildXL's three-bucket OS (`win` / `macOS` / `unix`), which is all `Context.getCurrentHost()` exposes — so on Linux, FreeBSD, or Haiku it reports `unix`. If your workspace's qualifier vocabulary uses finer labels (e.g., `os: "linux" | "freebsd"`), the singleton's emitted qualifier won't match the workspace type. Use `Rules.makeExecTransition({os, cpu})` to pin the host labels in code:
+
+```typescript
+const myExec = Rules.makeExecTransition({ os: "linux", cpu: "x64" });
+const execCfg = myExec.apply(targetCfg);
+```
+
 **Caveat — language gap.** BuildXL's `withQualifier` is a syntactic construct on namespace imports, not a value-level call. So a Transition produces the new Configuration but cannot itself invoke `withQualifier`. The call-site contract today is:
 
 ```typescript

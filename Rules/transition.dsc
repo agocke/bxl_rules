@@ -85,7 +85,7 @@ export const IdentityTransition: Transition = <Transition>{
 export const TargetTransition: Transition = IdentityTransition;
 
 /**
- * Switch the Configuration to the host's exec platform.
+ * Switch the Configuration to a fixed exec platform.
  *
  * Used for build tools (compilers, codegen, etc.) that must run on
  * the machine performing the build, regardless of the target the
@@ -93,27 +93,64 @@ export const TargetTransition: Transition = IdentityTransition;
  * transition (and Bazel's `cfg = "exec"` after the 2019 redesign).
  *
  * Behaviour:
- *   - `platform` ← `hostExecPlatform()`.
+ *   - `os` constraint  ← `host.os`.
+ *   - `cpu` constraint ← `host.cpu`.
  *   - `mode` constraint is preserved (so debug/release status of the
  *     target build still drives debug/release of the tools — usually
  *     desirable for matched symbol shapes).
  *   - All other constraints are dropped (they're target-specific by
  *     definition and have no meaning on the exec side).
+ *   - `cfg.platform` reflects the supplied host as `<os>-<cpu>`.
  *
  * Idempotency: applying twice is a no-op because the second application
- * sees a Configuration whose platform already equals `hostExecPlatform()`.
+ * sees a Configuration whose `os`/`cpu` already equal the supplied host's.
+ *
+ * Why a factory instead of a singleton: workspaces vary in the
+ * vocabulary they use for host labels (some say `os: "linux"`, others
+ * say `os: "unix"` to match BuildXL's three-bucket `OsType`). The SDK
+ * doesn't know which vocabulary your qualifier matrix declares —
+ * picking one would silently misalign with workspaces using the other.
+ * The workspace owner constructs `makeExecTransition` once with their
+ * own labels, typically near the qualifier declaration. See also the
+ * convenience `ExecTransition` singleton, which is `makeExecTransition`
+ * applied to BuildXL's auto-detected labels.
+ *
+ * @param host  The host platform's `os` and `cpu` labels. These must
+ *              match values that the workspace's qualifier type accepts
+ *              (otherwise the eventual `withQualifier(...)` import will
+ *              be rejected by BuildXL's qualifier checker).
  */
 @@public
-export const ExecTransition: Transition = <Transition>{
-    __transitionBrand: undefined,
-    name: "exec",
-    apply: (cfg: Configuration) => execApply(cfg),
-};
-
-function execApply(cfg: Configuration): Configuration {
-    const mode = getConstraint(cfg, ConstraintSettings.mode);
-    const q = mode !== undefined
-        ? <Qualifier><any>{ platform: hostExecPlatform(), configuration: mode }
-        : <Qualifier><any>{ platform: hostExecPlatform() };
-    return fromQualifier(q);
+export function makeExecTransition(host: { os: string; cpu: string; }): Transition {
+    return <Transition>{
+        __transitionBrand: undefined,
+        name: "exec(" + host.os + "-" + host.cpu + ")",
+        apply: (cfg: Configuration) => {
+            const mode = getConstraint(cfg, ConstraintSettings.mode);
+            const q = mode !== undefined
+                ? <Qualifier><any>{ os: host.os, cpu: host.cpu, configuration: mode }
+                : <Qualifier><any>{ os: host.os, cpu: host.cpu };
+            return fromQualifier(q);
+        },
+    };
 }
+
+/**
+ * Auto-host `ExecTransition`: applies `makeExecTransition` to the
+ * labels BuildXL itself detects via `Context.getCurrentHost()`.
+ *
+ * Convenient for workspaces whose qualifier vocabulary matches
+ * BuildXL's own (`os: "windows" | "macos" | "unix"`). Workspaces that
+ * use finer-grained labels (e.g. `"linux"`, `"freebsd"`, `"haiku"`) or
+ * that need to set CPU explicitly must construct their own transition
+ * via `makeExecTransition({os, cpu})` — BuildXL's detection is only
+ * three-way on OS and `"x64" | "x86"` on CPU, so any other label is
+ * the workspace's call.
+ *
+ * Caveat: BuildXL reports `"unix"` for all non-Windows non-macOS hosts,
+ * so on Linux this transition produces `os: "unix"`. If your qualifier
+ * matrix declares `os: "linux" | ...`, you want `makeExecTransition`,
+ * not this singleton.
+ */
+@@public
+export const ExecTransition: Transition = makeExecTransition({ os: hostOs(), cpu: hostCpu() });
