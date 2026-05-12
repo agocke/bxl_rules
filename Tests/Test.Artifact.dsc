@@ -321,34 +321,3 @@ function test_cmdOutput_acceptsUnbound(): string {
 @@public export const tartA19 = test_cmdInput_returnsDefinedForSource();
 @@public export const tartA20 = test_cmdInput_returnsDefinedForBound();
 @@public export const tartA21 = test_cmdOutput_acceptsUnbound();
-
-// ----------------------------------------------------------------------------
-// createActions adapter — happy path exercising single-binding bookkeeping
-// ----------------------------------------------------------------------------
-
-function test_createActions_declareOutputReturnsUnbound(): string {
-    const actions = Rules.createActions("test-actions-declare");
-    const a = actions.declareOutput("hello.txt");
-    Contract.assert(a.kind === "unbound",
-        `actions.declareOutput must return an unbound Artifact; got "${a.kind}"`);
-    return "ok";
-}
-
-function test_createActions_writeFileBindsOutput(): string {
-    // Exercises the path-keyed claim() set on the writeFile route: the
-    // declared output is unbound, writeFile claims it (single-binding
-    // enforcement) and returns a bound Artifact. A second writeFile to
-    // the same path would throw, but DScript lacks try/catch so we can
-    // only assert the success-side contract here.
-    const actions = Rules.createActions("test-actions-writefile");
-    const a = actions.declareOutput("greeting.txt");
-    const bound = actions.writeFile(a, ["hello"]);
-    Contract.assert(bound.kind === "bound",
-        `writeFile must return a bound Artifact; got "${bound.kind}"`);
-    Contract.assert(bound.boundFile !== undefined,
-        "writeFile result must carry a DerivedFile via boundFile");
-    return "ok";
-}
-
-@@public export const tartA22 = test_createActions_declareOutputReturnsUnbound();
-@@public export const tartA23 = test_createActions_writeFileBindsOutput();

@@ -444,17 +444,19 @@ export function select<T>(conditions: [string, T][], matches: (key: string) => b
  *
  * All outputs are placed under a directory named after the target,
  * preventing collisions between targets. This is the implementation
- * backing `ctx.actions` in rule implementations; exposed here so
- * focused tests can exercise the Actions adapter directly without
- * spinning up a full `rule()` invocation.
+ * backing `ctx.actions` in rule implementations.
  *
  * Output binding model: `declareOutput` returns an *unbound* Artifact;
  * `run` / `writeFile` / `copyFile` return *bound* Artifacts (carrying
  * the produced `DerivedFile`). Rule code passes the bound result
  * downstream when wiring deps.
+ *
+ * Not exported: each invocation owns its own `claimedPaths` set, so the
+ * single-binding invariant lives in the rule-evaluation closure. Exposing
+ * the factory would let callers spin up siblings with the same target
+ * name and quietly bypass the check.
  */
-@@public
-export function createActions(targetName: string): Actions {
+function createActions(targetName: string): Actions {
     const targetDir = Context.getNewOutputDirectory(targetName);
     const claimedPaths = MutableSet.empty<string>();
 
