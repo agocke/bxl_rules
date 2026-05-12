@@ -39,9 +39,8 @@ import {Artifact as Tx, Cmd, Transformer} from "Sdk.Transformers";
  * resolved input/output artifacts without constructing paths manually.
  *
  * `srcs` mirrors the SourceArtifacts supplied in `GenruleArguments.srcs`.
- * `outs` are `OutputArtifact` binding handles already projected from the
- * declared Artifacts the SDK created for `GenruleArguments.outs` — pass
- * each one's underlying `.artifact.path` to `Artifact.output(...)` for
+ * `outs` are the unbound declared Artifacts the SDK created for
+ * `GenruleArguments.outs` — pass each one to `Rules.cmdOutput(...)` for
  * command-line use.
  */
 @@public
@@ -49,8 +48,8 @@ export interface GenruleCmdContext {
     /** The source artifacts in the same order as `GenruleArguments.srcs`. */
     srcs: SourceArtifact[];
 
-    /** Output binding handles in the same order as `GenruleArguments.outs`. */
-    outs: OutputArtifact[];
+    /** Unbound output Artifacts in the same order as `GenruleArguments.outs`. */
+    outs: Artifact[];
 
     /** The output directory chosen for this rule. */
     outDir: Directory;
@@ -78,8 +77,8 @@ export interface GenruleArguments {
      *
      * Example:
      *   cmd: (ctx) => [
-     *       Cmd.argument(Artifact.input(Rules.getFile(ctx.srcs[0]))),
-     *       Cmd.option("--out=", Artifact.output(ctx.outs[0].artifact.path)),
+     *       Cmd.argument(Rules.cmdInput(ctx.srcs[0])),
+     *       Cmd.option("--out=", Rules.cmdOutput(ctx.outs[0])),
      *   ]
      */
     cmd: (ctx: GenruleCmdContext) => Argument[];
@@ -125,11 +124,10 @@ export function genrule(args: GenruleArguments): GenruleResult {
     const outDir = Context.getNewOutputDirectory(args.name);
     const srcs = args.srcs || [];
     const declaredOuts = args.outs.map(name => declareArtifact(outDir, name.toString()));
-    const outputBindings = declaredOuts.map(a => asOutput(a));
 
     const ctx: GenruleCmdContext = {
         srcs: srcs,
-        outs: outputBindings,
+        outs: declaredOuts,
         outDir: outDir,
     };
 

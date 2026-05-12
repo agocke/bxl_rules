@@ -14,8 +14,7 @@
  * Artifact model (artifact.dsc):
  *   - Artifact            — referenceable handle (may be unbound)
  *   - SourceArtifact      — wraps a workspace File; always bound
- *   - OutputArtifact      — single-use binding handle from `asOutput`
- *   - declareArtifact / sourceArtifact / asOutput — factories
+ *   - declareArtifact / sourceArtifact — factories
  *   - bindArtifact / getFile — binding helpers used by the Actions adapter
  *   - cmdInput / cmdOutput — sanctioned wrappers for tool command lines
  *                           (route around the `@internal` Artifact.path)
@@ -24,8 +23,8 @@
  *   - depset<T>()         — tree-structured, deduplicated transitive collection
  *   - provider<T>()       — typed key for extensible rule outputs
  *   - DefaultInfo         — universal output descriptor
- *   - Actions             — the action API (declareOutput / run / writeFile / copyFile)
- *                           speaking in Artifact / OutputArtifact
+ *   - Actions             — the action API (declareOutput / run / writeFile / copyFile);
+ *                           enforces within-target single-binding via a path-keyed set
  *   - rule()              — the declarative rule factory
  *   - LabelResolver       — returns SourceArtifact (not raw File)
  *

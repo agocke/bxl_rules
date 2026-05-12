@@ -19,10 +19,18 @@ import {Artifact as Tx} from "Sdk.Transformers";
  *   - `OutputArtifact`  — binding handle obtained via `.as_output()`,
  *                         which is consumed by exactly one action.
  *
- * This file ports that split to DScript. Because DScript has no classes
- * and no method-on-interface syntax that captures `this`, the projection
- * is exposed as the free function `Rules.asOutput(art)` rather than as
- * an `Artifact.asOutput()` method.
+ * This SDK ports the discriminator (`kind: "unbound" | "bound" |
+ * "source"`) but not the second type. Buck2's `OutputArtifact` carries
+ * its weight in Starlark because Artifact binding is *mutable state*
+ * on the Artifact itself — the type system needs a separate handle to
+ * track "this Artifact is being claimed as an output." Our `Artifact`
+ * is a value-shaped record (`bindArtifact` returns a *new* bound
+ * Artifact; the input stays as it was), so the only legitimate work an
+ * `OutputArtifact` wrapper would do is reject the wrong `kind` — which
+ * `cmdOutput` and the `Actions` adapter do directly on the `Artifact`.
+ * The within-target "at most one action binds this output" property is
+ * enforced at runtime by the `Actions` adapter via a path-keyed set
+ * (see `createActions` in providers.dsc).
  *
  * Type taxonomy
  * -------------
@@ -30,10 +38,8 @@ import {Artifact as Tx} from "Sdk.Transformers";
  *                      `kind` (one of "unbound" | "bound" | "source"),
  *                      and the underlying `Path`.
  *   SourceArtifact   — extends Artifact; wraps a workspace `File`. Has
- *                      `kind === "source"`. May not be passed to
- *                      `asOutput`.
- *   OutputArtifact   — binding handle; holds the `Artifact` it backs.
- *                      Carry semantics: feed to an action's `outputs`.
+ *                      `kind === "source"`. Rejected anywhere an
+ *                      output Artifact is expected.
  *
  * Why a `kind` discriminator (not paired booleans)
  * ------------------------------------------------
@@ -42,7 +48,7 @@ import {Artifact as Tx} from "Sdk.Transformers";
  * output but bound. DScript's checker does not yet narrow union types
  * based on a field's runtime value (the way TypeScript narrows a
  * discriminated union inside an `if (x.kind === "bound")` block), so
- * `getFile` / `bindArtifact` / `asOutput` continue to enforce
+ * `getFile` / `bindArtifact` / `cmdOutput` continue to enforce
  * preconditions through `Contract.requires(...)` rather than via
  * static narrowing. The shape, however, is forward-compatible: the
  * day DScript narrows discriminated unions, redefining
@@ -55,9 +61,9 @@ import {Artifact as Tx} from "Sdk.Transformers";
  *
  * Construction discipline
  * -----------------------
- *   - All three types are tagged-interface-branded, so a bare object
- *     literal cannot satisfy them; callers must go through the factories
- *     `declareArtifact`, `sourceArtifact`, and `asOutput`.
+ *   - Both types are tagged-interface-branded, so a bare object literal
+ *     cannot satisfy them; callers must go through `declareArtifact` or
+ *     `sourceArtifact`.
  *   - `path: Path` is exposed because the `Actions.run` adapter needs
  *     it to call `Transformer.execute({outputs: [...]})`, but rule
  *     authors must not stringify it — `path` is marked `@internal` and
@@ -121,7 +127,7 @@ export interface Artifact {
      * Discriminator: "unbound" | "bound" | "source".
      *
      *   - "unbound": freshly declared output; no producing action yet.
-     *     `getFile` will reject; pass to `Actions.run` (via `asOutput`)
+     *     `getFile` will reject; pass to `Actions.run` (in `outputs:`)
      *     to produce a bound version.
      *   - "bound":   declared output with a registered producing action.
      *     `boundFile` is populated; `getFile` returns it.
@@ -182,34 +188,6 @@ export interface SourceArtifact extends Artifact {
 
     /** The bound source `File` this artifact wraps. */
     file: File;
-}
-
-/**
- * A binding handle for an `Artifact`. Obtained via `Rules.asOutput(art)`
- * and consumed by exactly one action's `outputs` slot.
- *
- * Holding an `OutputArtifact` represents the *intent* to bind the
- * underlying `Artifact` to a producing action. The single-use semantics
- * (one action per Output) are runtime-enforced by the `Actions.run`
- * adapter.
- *
- * Always construct via `asOutput`; never via an object literal (the
- * `__outputArtifactBrand` field is enforced).
- */
-@@public
-export interface OutputArtifact {
-    /** Tagged-interface brand. Do not set or read. */
-    __outputArtifactBrand: any;
-
-    /**
-     * The `Artifact` this binding handle is backing.
-     *
-     * **@internal** — SDK adapters only. Rule code should pass the
-     * `OutputArtifact` directly to `Actions.run`'s `outputs:` list (or
-     * use `Rules.cmdOutput(out)` to reference it on a command line)
-     * rather than reaching through `.artifact.path`.
-     */
-    artifact: Artifact;
 }
 
 // ============================================================================
@@ -289,34 +267,6 @@ export function sourceArtifact(file: File): SourceArtifact {
 }
 
 /**
- * Project an `Artifact` to an `OutputArtifact`, the binding handle that
- * an action's `outputs` slot consumes.
- *
- * Calling `asOutput` is purely a type-level projection: each call
- * returns a *fresh* `OutputArtifact` value; the underlying `Artifact`
- * is shared. The `Actions.run` adapter runtime-enforces the
- * single-binding rule by tracking which `OutputArtifact`s have been
- * consumed.
- *
- * `asOutput` rejects `SourceArtifact`s (a source file cannot be a
- * producing action's output).
- */
-@@public
-export function asOutput(art: Artifact): OutputArtifact {
-    Contract.requires(art !== undefined, "asOutput: artifact must not be undefined");
-    Contract.requires(art.kind !== "source",
-        "asOutput: a SourceArtifact cannot be used as an action output");
-    return <OutputArtifact>{
-        __outputArtifactBrand: undefined,
-        artifact: art,
-    };
-}
-
-// ============================================================================
-//  Equality
-// ============================================================================
-
-/**
  * True iff two Artifacts denote the same underlying path.
  *
  * Compares paths via reference equality first (BuildXL canonicalises
@@ -330,17 +280,6 @@ export function artifactsEqual(a: Artifact, b: Artifact): boolean {
     if (a === undefined || b === undefined) return false;
     if (a.path === b.path) return true;
     return a.path.toDiagnosticString() === b.path.toDiagnosticString();
-}
-
-/**
- * True iff two OutputArtifacts back the same underlying Artifact.
- *
- * Returns false if either argument is undefined.
- */
-@@public
-export function outputArtifactsEqual(a: OutputArtifact, b: OutputArtifact): boolean {
-    if (a === undefined || b === undefined) return false;
-    return artifactsEqual(a.artifact, b.artifact);
 }
 
 // ============================================================================
@@ -430,19 +369,24 @@ export function cmdInput(art: Artifact): ArgumentValue {
 }
 
 /**
- * Wrap an `OutputArtifact` so it can be referenced on a tool command
- * line as an *output*. The Artifact does not need to be bound — this is
- * the wiring that lets BuildXL learn the producing pip's output paths
- * at command-line construction time.
+ * Wrap an unbound declared `Artifact` so it can be referenced on a tool
+ * command line as an *output*. The Artifact does not need to be bound
+ * yet — this is the wiring that lets BuildXL learn the producing pip's
+ * output paths at command-line construction time.
  *
- * Equivalent to `Sdk.Transformers.Artifact.output(out.artifact.path)`,
- * but hides the `@internal` `Artifact.path` field.
+ * Equivalent to `Sdk.Transformers.Artifact.output(art.path)`, but hides
+ * the `@internal` `Artifact.path` field. Symmetric with `cmdInput`:
+ * `cmdInput` accepts any Artifact whose `kind !== "unbound"` (source or
+ * bound); `cmdOutput` accepts only `kind === "unbound"` (the same
+ * Artifact you'd hand to `Actions.run`'s `outputs:`).
  *
  * Pass the result to `Cmd.argument(...)` for a positional argument, or
  * to `Cmd.option("/out:", ...)` for an option value.
  */
 @@public
-export function cmdOutput(out: OutputArtifact): ArgumentValue {
-    Contract.requires(out !== undefined, "cmdOutput: OutputArtifact must not be undefined");
-    return Tx.output(out.artifact.path);
+export function cmdOutput(art: Artifact): ArgumentValue {
+    Contract.requires(art !== undefined, "cmdOutput: artifact must not be undefined");
+    Contract.requires(art.kind === "unbound",
+        `cmdOutput: artifact must be unbound (kind === "unbound"); got "${art.kind}". A SourceArtifact cannot be an output, and a bound Artifact has already been produced by a prior action.`);
+    return Tx.output(art.path);
 }

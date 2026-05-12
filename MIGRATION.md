@@ -13,10 +13,10 @@ If a section says "no change required", it's listed only so you can verify your 
 - [ ] Update `LabelResolver` consumers — `resolver.resolve(label)` now returns `SourceArtifact`, not `File`.
 - [ ] Update rule `resolve` types — `srcs: File[]` → `srcs: SourceArtifact[]`.
 - [ ] Replace `ctx.actions.declareFile(name)` with `ctx.actions.declareOutput(name)` (returns `Artifact`, not `DerivedFile`).
-- [ ] Wrap each declared output with `Rules.asOutput(art)` before passing to `Actions.run.outputs`.
-- [ ] Destructure the new `Artifact[]` return of `Actions.run` (was `DerivedFile[]`).
+- [ ] Pass declared `Artifact`s directly to `Actions.run.outputs` (no `asOutput` wrapping — that type has been dropped).
+- [ ] Destructure the new `Artifact[]` return of `Actions.run` (was `DerivedFile[]`) and use the bound result downstream; the original declared handle is stale after binding.
 - [ ] Replace `Cmd.argument(Artifact.input(file))` with `Cmd.argument(Rules.cmdInput(art))`.
-- [ ] Replace `Cmd.option("/out:", Artifact.output(declared.path))` with `Cmd.option("/out:", Rules.cmdOutput(outHandle))`.
+- [ ] Replace `Cmd.option("/out:", Artifact.output(declared.path))` with `Cmd.option("/out:", Rules.cmdOutput(declaredArt))`.
 - [ ] Use `Rules.getFile(art)` (or `art.file` for sources) when a BuildXL primitive needs a raw `File`.
 
 ---
@@ -109,22 +109,38 @@ ctx.actions.run({
 const outFile: File = out;                                // already a File
 ```
 
-**After** — `declareOutput` returns an unbound `Artifact`; wrap with `asOutput` for the action; consume the bound `Artifact` returned by `run`:
+**After** — `declareOutput` returns an unbound `Artifact`; pass it directly to `outputs`; consume the bound `Artifact` returned by `run`:
 
 ```typescript
-const out      = ctx.actions.declareOutput("foo.dll");    // Artifact, kind: "unbound"
-const outHdl   = Rules.asOutput(out);                     // OutputArtifact (single-use)
-const [bound]  = ctx.actions.run({                        // returns Artifact[] (bound)
-    outputs: [outHdl],
-    arguments: [Cmd.option("/out:", Rules.cmdOutput(outHdl))]
+const out     = ctx.actions.declareOutput("foo.dll");    // Artifact, kind: "unbound"
+const [bound] = ctx.actions.run({                        // returns Artifact[] (bound)
+    outputs: [out],
+    arguments: [Cmd.option("/out:", Rules.cmdOutput(out))]
 });
-const outFile: File = Rules.getFile(bound);               // the produced DerivedFile
+const outFile: File = Rules.getFile(bound);              // the produced DerivedFile
+// From here on, reference `bound`. `out` is a stale unbound handle.
 ```
 
 Three things changed:
 - The return of `declareOutput` is unbound. It becomes bound only after `run` returns. Don't carry the unbound value forward — use the value `run` returns.
-- `outputs: [...]` takes `OutputArtifact[]`, not `Artifact[]` and not `Path[]`. Wrap with `Rules.asOutput`.
-- `run` returns the bound `Artifact[]` in the same order as `outputs`. Destructure to wire downstream.
+- `outputs: [...]` takes `Artifact[]` (with `kind === "unbound"`), not `Path[]` and not `OutputArtifact[]` (that type has been removed — see *Why no `OutputArtifact`?* below).
+- `run` returns the bound `Artifact[]` in the same order as `outputs`. Destructure and use the bound values.
+
+**Why no `OutputArtifact`?** Buck2 needs a separate output-handle type because Starlark's `Artifact` carries mutable binding state. Our `Artifact` is value-shaped — `bindArtifact` returns a new value rather than mutating in place — so a separate output-handle type carried no state that `Artifact` didn't. The useful property (each declared output is produced by exactly one action) is now enforced at runtime by the Actions adapter via a path-keyed `MutableSet`. Within a single target, double-binding the same declared path through `run`/`writeFile`/`copyFile` throws at analysis time. Cross-target double-binding still falls to BuildXL's pip-graph layer.
+
+**Stale-handle footgun.** `Actions.run` returns the bound Artifact; the original unbound handle stays stale. To keep the two from being confused, prefer the destructure pattern:
+
+```typescript
+const outArt = ctx.actions.declareOutput("foo.dll");
+const [foo]  = ctx.actions.run({
+    outputs: [outArt],
+    arguments: [..., Rules.cmdOutput(outArt)],
+    ...
+});
+// Use `foo` from here on; `outArt` is the stale unbound handle.
+```
+
+**Cmdline-vs-outputs gap.** The SDK does *not* pre-check that every cmdline-referenced output (via `Rules.cmdOutput`) also appears in the action's `outputs:` array. If you `cmdOutput(art)` without listing `art` in `outputs:`, BuildXL catches it later as a pip-graph error — not at SDK-evaluation time. In normal use this is the obvious "/out: flag without putting the file in outputs" mistake; flagged here only so the asymmetry isn't surprising when it fires.
 
 ## 5. Command-line construction
 
@@ -145,12 +161,12 @@ arguments: [
 import {Cmd} from "Sdk.Transformers";
 
 arguments: [
-    Cmd.option("/out:", Rules.cmdOutput(outHandle)),
+    Cmd.option("/out:", Rules.cmdOutput(declaredArt)),
     Cmd.argument(Rules.cmdInput(srcArtifact))
 ]
 ```
 
-Why: `Artifact.path` is now `@internal`. The `Rules.cmd*` helpers are the only sanctioned readers outside the SDK adapters. They also carry through the `getFile`-style `kind !== "unbound"` Contract check on inputs.
+Why: `Artifact.path` is now `@internal`. The `Rules.cmd*` helpers are the only sanctioned readers outside the SDK adapters. They also carry through Contract preconditions: `cmdInput` asserts `kind !== "unbound"`, and `cmdOutput` asserts `kind === "unbound"` (so source files and already-bound Artifacts can't be smuggled into the output position).
 
 You can still import `{Cmd}` from `Sdk.Transformers` directly — `Cmd.argument`, `Cmd.option`, etc. are unchanged.
 
@@ -234,13 +250,12 @@ interface MyResolved { name: string; srcs: Rules.SourceArtifact[]; }
 export const my_compiler = Rules.rule({
     resolve: (attrs, r) => ({ name: attrs.name, srcs: r.resolveAll(attrs.srcs) }),
     impl: (ctx) => {
-        const out      = ctx.actions.declareOutput(ctx.args.name + ".out");
-        const outHdl   = Rules.asOutput(out);
-        const [bound]  = ctx.actions.run({
+        const out     = ctx.actions.declareOutput(ctx.args.name + ".out");
+        const [bound] = ctx.actions.run({
             tool: ctx.toolchain.compiler,
-            outputs: [outHdl],
+            outputs: [out],
             arguments: [
-                Cmd.option("/out:", Rules.cmdOutput(outHdl)),
+                Cmd.option("/out:", Rules.cmdOutput(out)),
                 ...ctx.args.srcs.map(s => Cmd.argument(Rules.cmdInput(s)))
             ]
         });
@@ -253,4 +268,4 @@ export const my_compiler = Rules.rule({
 });
 ```
 
-The mechanical edits: `declareFile` → `declareOutput`; introduce `outHdl = asOutput(out)`; `outputs: [out]` → `outputs: [outHdl]`; `Artifact.output(out.path)` → `Rules.cmdOutput(outHdl)`; `Artifact.input(s)` → `Rules.cmdInput(s)`; destructure `Actions.run`'s return; `srcs: File[]` → `srcs: SourceArtifact[]`; `defaultInfo` files via `Rules.getFile(bound)`.
+The mechanical edits: `declareFile` → `declareOutput`; `Artifact.output(out.path)` → `Rules.cmdOutput(out)`; `Artifact.input(s)` → `Rules.cmdInput(s)`; destructure `Actions.run`'s return and use the bound result downstream; `srcs: File[]` → `srcs: SourceArtifact[]`; `defaultInfo` files via `Rules.getFile(bound)`.

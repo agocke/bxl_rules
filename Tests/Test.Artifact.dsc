@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 /**
- * Tests for Rules/artifact.dsc (Artifact / SourceArtifact / OutputArtifact).
+ * Tests for Rules/artifact.dsc (Artifact / SourceArtifact, plus the
+ * Actions adapter's single-binding bookkeeping).
  *
  * Same harness as Test.Config.dsc and Test.Transition.dsc: each test
  * returns "ok" on success; a `Contract.assert` failure aborts evaluation
@@ -116,35 +117,6 @@ function test_sourceArtifact_pathMatchesFilePath(): string {
 }
 
 // ----------------------------------------------------------------------------
-// asOutput
-// ----------------------------------------------------------------------------
-
-function test_asOutput_wrapsArtifact(): string {
-    const dir = Context.getNewOutputDirectory("test-asoutput-wrap");
-    const art = Rules.declareArtifact(dir, "out.bin");
-    const out = Rules.asOutput(art);
-
-    Contract.assert(out.artifact === art,
-        "asOutput must reference the supplied Artifact");
-
-    return "ok";
-}
-
-function test_asOutput_returnsFreshInstancePerCall(): string {
-    const dir = Context.getNewOutputDirectory("test-asoutput-fresh");
-    const art = Rules.declareArtifact(dir, "out.bin");
-    const o1 = Rules.asOutput(art);
-    const o2 = Rules.asOutput(art);
-
-    Contract.assert(o1 !== o2,
-        "each asOutput call must return a fresh OutputArtifact instance");
-    Contract.assert(o1.artifact === o2.artifact,
-        "both OutputArtifacts must back the same underlying Artifact");
-
-    return "ok";
-}
-
-// ----------------------------------------------------------------------------
 // SourceArtifact is structurally an Artifact (can be passed where Artifact expected)
 // ----------------------------------------------------------------------------
 
@@ -218,41 +190,6 @@ function test_artifactsEqual_sourceVsDeclaredAtSamePathWouldBeEqual(): string {
 
     Contract.assert(Rules.artifactsEqual(src, src2),
         "two SourceArtifacts at the same path must compare equal");
-
-    return "ok";
-}
-
-// ----------------------------------------------------------------------------
-// outputArtifactsEqual
-// ----------------------------------------------------------------------------
-
-function test_outputArtifactsEqual_delegatesToArtifactsEqual(): string {
-    const dir = Context.getNewOutputDirectory("test-oeq");
-    const a = Rules.declareArtifact(dir, "x.dll");
-    const b = Rules.declareArtifact(dir, "x.dll");
-    const oa = Rules.asOutput(a);
-    const ob = Rules.asOutput(b);
-
-    Contract.assert(Rules.outputArtifactsEqual(oa, ob),
-        "OutputArtifacts backing equal Artifacts must compare equal");
-
-    const c = Rules.declareArtifact(dir, "y.dll");
-    const oc = Rules.asOutput(c);
-    Contract.assert(!Rules.outputArtifactsEqual(oa, oc),
-        "OutputArtifacts backing unequal Artifacts must compare unequal");
-
-    return "ok";
-}
-
-function test_outputArtifactsEqual_undefinedReturnsFalse(): string {
-    const dir = Context.getNewOutputDirectory("test-oeq-undef");
-    const a = Rules.declareArtifact(dir, "x.dll");
-    const oa = Rules.asOutput(a);
-
-    Contract.assert(!Rules.outputArtifactsEqual(oa, undefined),
-        "outputArtifactsEqual(oa, undefined) must be false");
-    Contract.assert(!Rules.outputArtifactsEqual(undefined, oa),
-        "outputArtifactsEqual(undefined, oa) must be false");
 
     return "ok";
 }
@@ -350,15 +287,14 @@ function test_cmdInput_returnsDefinedForBound(): string {
     return "ok";
 }
 
-function test_cmdOutput_returnsDefined(): string {
+function test_cmdOutput_acceptsUnbound(): string {
     // cmdOutput accepts an unbound declared output; it does not require
     // a producing action because it IS the wiring that registers one.
-    const dir = Context.getNewOutputDirectory("test-cmdoutput");
+    const dir = Context.getNewOutputDirectory("test-cmdoutput-unbound");
     const declared = Rules.declareArtifact(dir, "out.dll");
-    const handle = Rules.asOutput(declared);
 
-    const arg = Rules.cmdOutput(handle);
-    Contract.assert(arg !== undefined, "cmdOutput must return a defined value");
+    const arg = Rules.cmdOutput(declared);
+    Contract.assert(arg !== undefined, "cmdOutput must return a defined value for an unbound Artifact");
 
     return "ok";
 }
@@ -372,20 +308,47 @@ function test_cmdOutput_returnsDefined(): string {
 @@public export const tartA06 = test_declareArtifact_undefinedOpts_isOK();
 @@public export const tartA07 = test_sourceArtifact_basic();
 @@public export const tartA08 = test_sourceArtifact_pathMatchesFilePath();
-@@public export const tartA09 = test_asOutput_wrapsArtifact();
-@@public export const tartA10 = test_asOutput_returnsFreshInstancePerCall();
-@@public export const tartA11 = test_sourceArtifact_isUsableAsArtifact();
-@@public export const tartA12 = test_artifactsEqual_sameInstance();
-@@public export const tartA13 = test_artifactsEqual_samePathDifferentInstances();
-@@public export const tartA14 = test_artifactsEqual_differentPaths();
-@@public export const tartA15 = test_artifactsEqual_undefinedReturnsFalse();
-@@public export const tartA16 = test_artifactsEqual_sourceVsDeclaredAtSamePathWouldBeEqual();
-@@public export const tartA17 = test_outputArtifactsEqual_delegatesToArtifactsEqual();
-@@public export const tartA18 = test_outputArtifactsEqual_undefinedReturnsFalse();
-@@public export const tartA19 = test_declareArtifact_boundFileIsUndefined();
-@@public export const tartA20 = test_sourceArtifact_boundFileIsUndefined();
-@@public export const tartA21 = test_getFile_returnsUnderlyingFile_forSource();
-@@public export const tartA22 = test_getFile_returnsBoundFile_forDerived();
-@@public export const tartA23 = test_cmdInput_returnsDefinedForSource();
-@@public export const tartA24 = test_cmdInput_returnsDefinedForBound();
-@@public export const tartA25 = test_cmdOutput_returnsDefined();
+@@public export const tartA09 = test_sourceArtifact_isUsableAsArtifact();
+@@public export const tartA10 = test_artifactsEqual_sameInstance();
+@@public export const tartA11 = test_artifactsEqual_samePathDifferentInstances();
+@@public export const tartA12 = test_artifactsEqual_differentPaths();
+@@public export const tartA13 = test_artifactsEqual_undefinedReturnsFalse();
+@@public export const tartA14 = test_artifactsEqual_sourceVsDeclaredAtSamePathWouldBeEqual();
+@@public export const tartA15 = test_declareArtifact_boundFileIsUndefined();
+@@public export const tartA16 = test_sourceArtifact_boundFileIsUndefined();
+@@public export const tartA17 = test_getFile_returnsUnderlyingFile_forSource();
+@@public export const tartA18 = test_getFile_returnsBoundFile_forDerived();
+@@public export const tartA19 = test_cmdInput_returnsDefinedForSource();
+@@public export const tartA20 = test_cmdInput_returnsDefinedForBound();
+@@public export const tartA21 = test_cmdOutput_acceptsUnbound();
+
+// ----------------------------------------------------------------------------
+// createActions adapter — happy path exercising single-binding bookkeeping
+// ----------------------------------------------------------------------------
+
+function test_createActions_declareOutputReturnsUnbound(): string {
+    const actions = Rules.createActions("test-actions-declare");
+    const a = actions.declareOutput("hello.txt");
+    Contract.assert(a.kind === "unbound",
+        `actions.declareOutput must return an unbound Artifact; got "${a.kind}"`);
+    return "ok";
+}
+
+function test_createActions_writeFileBindsOutput(): string {
+    // Exercises the path-keyed claim() set on the writeFile route: the
+    // declared output is unbound, writeFile claims it (single-binding
+    // enforcement) and returns a bound Artifact. A second writeFile to
+    // the same path would throw, but DScript lacks try/catch so we can
+    // only assert the success-side contract here.
+    const actions = Rules.createActions("test-actions-writefile");
+    const a = actions.declareOutput("greeting.txt");
+    const bound = actions.writeFile(a, ["hello"]);
+    Contract.assert(bound.kind === "bound",
+        `writeFile must return a bound Artifact; got "${bound.kind}"`);
+    Contract.assert(bound.boundFile !== undefined,
+        "writeFile result must carry a DerivedFile via boundFile");
+    return "ok";
+}
+
+@@public export const tartA22 = test_createActions_declareOutputReturnsUnbound();
+@@public export const tartA23 = test_createActions_writeFileBindsOutput();

@@ -130,14 +130,13 @@ export const my_compiler = Rules.rule<MyAttrs, MyResolved, MyToolchain, MyResult
     // Impl: build logic — only sees resolved artifacts
     impl: (ctx) => {
         const out = ctx.actions.declareOutput(ctx.args.name + ".out");
-        const outHandle = Rules.asOutput(out);
         const [boundOut] = ctx.actions.run({
             tool: ctx.toolchain.compiler,
             arguments: [
-                Cmd.option("/out:", Rules.cmdOutput(outHandle)),
+                Cmd.option("/out:", Rules.cmdOutput(out)),
                 ...ctx.args.srcs.map(s => Cmd.argument(Rules.cmdInput(s)))
             ],
-            outputs: [outHandle]
+            outputs: [out]
         });
         return {
             kind: "MyResult",
@@ -186,23 +185,23 @@ The `ctx.actions` API is how rule implementations declare outputs and run proces
 ```typescript
 // Declare an output (the framework decides where it goes)
 const out = ctx.actions.declareOutput("output.dll");
-const outHandle = Rules.asOutput(out);
 
 // Run a process — returns the BOUND artifacts in the same order as outputs
 const [outArt] = ctx.actions.run({
     tool: ctx.toolchain.compiler,
     arguments: [
-        Cmd.option("/out:", Rules.cmdOutput(outHandle)),
+        Cmd.option("/out:", Rules.cmdOutput(out)),
         ...sources.map(s => Cmd.argument(Rules.cmdInput(s)))
     ],
-    outputs: [outHandle],               // OutputArtifact, not raw path
+    outputs: [out],                     // unbound Artifact, not a raw path
     description: "compile: MyLib"
 });
 
 // outArt.kind === "bound"; Rules.getFile(outArt) is the produced DerivedFile
+// `out` (the original declared handle) is now stale — use `outArt` from here on.
 ```
 
-You can't pass raw paths as outputs — only `OutputArtifact` instances obtained from `Rules.asOutput(declaredArtifact)`. This ensures the framework controls output placement, prevents collisions between targets, and tracks bind/unbound state. Likewise, command-line construction goes through `Rules.cmdInput` / `Rules.cmdOutput` so rule code never touches the `@internal` `Artifact.path` field.
+You can't pass raw paths as outputs — only unbound `Artifact`s from `ctx.actions.declareOutput(...)`. The Actions adapter tracks every claimed output path in a per-target set; double-binding the same path (whether across `run`/`writeFile`/`copyFile` or within a single `run.outputs` array) throws at analysis time. Passing a `SourceArtifact` or an already-bound Artifact as an output also throws, since `kind` must be `"unbound"`. Command-line construction goes through `Rules.cmdInput` / `Rules.cmdOutput` so rule code never touches the `@internal` `Artifact.path` field.
 
 Other action helpers:
 - `ctx.actions.writeFile(output, lines)` — write a text file (returns bound Artifact)
@@ -212,7 +211,7 @@ Other action helpers:
 
 An **Artifact** is the unit rule code passes around when wiring inputs and outputs. It replaces the older `DeclaredOutput` and the bare `File` shape borrowed from BuildXL — both of which let rule code accidentally smuggle raw filesystem paths into the build graph.
 
-There are three types, all branded so a bare object literal can't accidentally satisfy them:
+There are two branded interfaces:
 
 ```typescript
 type ArtifactKind = "unbound" | "bound" | "source";
@@ -229,23 +228,22 @@ interface SourceArtifact extends Artifact { // wraps a workspace File; always bo
     kind: "source";                        // narrowed discriminator
     file: File;
 }
-
-interface OutputArtifact {                  // single-use binding handle
-    artifact: Artifact;                     // @internal — SDK adapters only
-}
 ```
 
-`kind` is a string-literal discriminator (not paired booleans) so the day DScript narrows discriminated unions reliably, redefining `type Artifact = UnboundArtifact | BoundArtifact | SourceArtifact` — each variant pinning `kind` to a single literal — is a near-trivial change. Today the checker doesn't narrow on field values, so the bound/unbound precondition on `getFile`, `bindArtifact`, and `asOutput` is still enforced by `Contract.requires(...)` rather than statically.
+`kind` is a string-literal discriminator (not paired booleans) so the day DScript narrows discriminated unions reliably, redefining `type Artifact = UnboundArtifact | BoundArtifact | SourceArtifact` — each variant pinning `kind` to a single literal — is a near-trivial change. Today the checker doesn't narrow on field values, so the unbound/bound preconditions on `getFile`, `bindArtifact`, and the Actions adapter's output slots are enforced by `Contract.requires(...)` rather than statically.
+
+**Why no separate `OutputArtifact` type?** Buck2 needs `OutputArtifact` because Starlark's `Artifact` carries mutable binding state and the type system has to distinguish the "I'm reading this" handle from the "I'm producing this" handle. Our `Artifact` is value-shaped (`bindArtifact` returns a new Artifact rather than mutating in place), so the type carries no state that a separate `OutputArtifact` would discipline. The actually-useful property — *each declared output is produced by exactly one action* — is enforced at runtime by the Actions adapter via a path-keyed `MutableSet` rather than by ceremony in the type.
 
 **The lifecycle:** declare → bind → reference.
 
 ```typescript
-const art = ctx.actions.declareOutput("foo.dll");   // Artifact, kind: "unbound"
-const [bound] = ctx.actions.run({                    // bind via Actions.run
-    outputs: [Rules.asOutput(art)],                  // single-use OutputArtifact
+const out     = ctx.actions.declareOutput("foo.dll");   // Artifact, kind: "unbound"
+const [bound] = ctx.actions.run({                       // bind via Actions.run
+    outputs: [out],
     ...
 });
 // bound.kind === "bound", bound.boundFile is the produced DerivedFile
+// `out` is now a stale handle — downstream wiring should reference `bound`.
 ```
 
 **Source files** entering through label resolution are wrapped in `SourceArtifact` automatically by the framework (the `LabelResolver` returns `SourceArtifact`, not raw `File`):
@@ -263,12 +261,11 @@ resolve: (attrs, resolver) => ({
 **Cheat sheet:**
 - `Rules.declareArtifact(targetDir, name, opts?)` — low-level factory (rule code uses `ctx.actions.declareOutput` instead).
 - `Rules.sourceArtifact(file)` — wrap a workspace `File`.
-- `Rules.asOutput(art)` — project an Artifact to its single-use binding handle. Rejects `SourceArtifact`s.
 - `Rules.getFile(art)` — extract the underlying `File`/`DerivedFile`. Asserts `kind !== "unbound"`.
 - `Rules.cmdInput(art)` — build a command-line input value. Wraps `Sdk.Transformers.Artifact.input(getFile(art))`.
-- `Rules.cmdOutput(out)` — build a command-line output value. Wraps `Sdk.Transformers.Artifact.output(out.artifact.path)`; this is the *only* sanctioned reader of `Artifact.path` outside the SDK adapters.
+- `Rules.cmdOutput(art)` — build a command-line output value for an unbound declared Artifact. Wraps `Sdk.Transformers.Artifact.output(art.path)`; this is the *only* sanctioned reader of `Artifact.path` outside the SDK adapters. Asserts `kind === "unbound"`.
 - `Rules.bindArtifact(unbound, derivedFile)` — internal; the Actions adapter calls this. Most rule code does not.
-- `Rules.artifactsEqual(a, b)`, `Rules.outputArtifactsEqual(a, b)` — undefined-safe equality.
+- `Rules.artifactsEqual(a, b)` — undefined-safe equality.
 
 ### Toolchains
 
@@ -451,9 +448,9 @@ If you know Bazel, here's the quick correspondence:
 | `ctx.actions.run()` | `ctx.actions.run()` |
 | `File` (input) | `Artifact` / `SourceArtifact` |
 | `File` (output of action) | `Artifact` (with `boundFile`) |
-| Buck2 `OutputArtifact` (`.as_output()`) | `OutputArtifact` (`Rules.asOutput(art)`) |
+| Buck2 `OutputArtifact` (`.as_output()`) | *Dropped*: declared `Artifact` is the binding handle; single-binding enforced at runtime by the Actions adapter |
 | `ctx.actions.args().add(file)` | `Cmd.argument(Rules.cmdInput(art))` |
-| Bazel implicit output declaration via `args().add()` | `Cmd.argument(Rules.cmdOutput(out))` |
+| Bazel implicit output declaration via `args().add()` | `Cmd.argument(Rules.cmdOutput(unboundArt))` |
 | `ctx.files.srcs` | `ctx.args.srcs` (pre-resolved `SourceArtifact[]`) |
 | `toolchain_type` | `interface X extends Toolchain` |
 | `"//pkg:target"` labels | `"//pkg:target"` labels (same syntax) |
@@ -476,8 +473,8 @@ bxl_rules/
 │   ├── transition.dsc          — Transition, IdentityTransition,
 │   │                             TargetTransition, ExecTransition,
 │   │                             makeExecTransition
-│   ├── artifact.dsc            — Artifact, SourceArtifact, OutputArtifact,
-│   │                             declareArtifact, sourceArtifact, asOutput,
+│   ├── artifact.dsc            — Artifact, SourceArtifact,
+│   │                             declareArtifact, sourceArtifact,
 │   │                             bindArtifact, getFile, cmdInput, cmdOutput
 │   ├── providers.dsc           — Provider, DefaultInfo, depset, rule(),
 │   │                             Actions, Label, LabelResolver, select
