@@ -191,7 +191,7 @@ There's no enforced change — providers can carry whatever fields they like. Tw
 ## What did **not** change
 
 - BUILD.dsc call sites (the user-facing Part 1 of the README): `csharp_library({ name, srcs, refs })` etc. all still take label-string arrays. The artifact split is invisible above the rule boundary.
-- `Toolchain` — still a field on the rule definition, accessed as `ctx.toolchain`. Will eventually become a configured dep but that's blocked.
+- `Toolchain` — still a field on the rule definition, accessed as `ctx.toolchain`. Wiring toolchains in as configured deps (Buck2-style) would require value-level transitions at the import boundary, which is the same BuildXL language gap that blocks `attrs.dep(target, transition)`.
 - `select()`, `depset()`, `Provider`, `DefaultInfo`, `rule()` factory shape — same signatures.
 - `Rules.Label` type and label string syntax — same.
 - `Cmd.*`, `Tool.*` — unchanged BuildXL surface.

@@ -17,7 +17,7 @@
  *     Configuration>` — the Configuration is just a field).
  *   - Labels are plain strings (no template-literal types in DScript).
  *
- * Drift hazard avoidance:
+ * Why the brand tag + factory enforcement:
  *   - `ConfiguredLabel` is brand-tagged so a bare `{label, configuration}`
  *     literal cannot accidentally satisfy the type — callers must go
  *     through `withConfiguration`.

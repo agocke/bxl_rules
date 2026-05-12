@@ -53,8 +53,8 @@ import {Artifact as Tx} from "Sdk.Transformers";
  * near-trivial change — the `kind` field is already the discriminant
  * the union would pivot on, and call sites already branch on it.
  *
- * Drift hazard avoidance
- * ----------------------
+ * Construction discipline
+ * -----------------------
  *   - All three types are tagged-interface-branded, so a bare object
  *     literal cannot satisfy them; callers must go through the factories
  *     `declareArtifact`, `sourceArtifact`, and `asOutput`.

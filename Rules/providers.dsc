@@ -268,35 +268,13 @@ export interface RuleContext<TResolved, TToolchain extends Toolchain> {
 // ============================================================================
 
 /**
- * Metadata for a rule declaration, analogous to Bazel's `rule()` call.
- *
- * In Bazel:
- *   csharp_binary = rule(impl, attrs={...}, toolchains=[...])
- *
- * In DScript:
- *   export const csharp_binary = rule<Attrs, Resolved, Toolchain, Result>({
- *       doc: "Compile a C# exe",
- *       toolchain: defaultToolchain,
- *       resolve: (attrs, dir) => ({ ...resolved fields... }),
- *       impl: (ctx) => compileImpl(ctx),
- *   });
- *
- * The `resolve` function maps caller-facing attrs (with Label[] fields)
- * to impl-facing resolved attrs (with File[] fields). This is analogous
- * to Bazel's attr.label_list() declarations — it tells the framework
- * which fields are labels and how to resolve them.
- *
- * The returned function accepts TAttrs (labels) from callers, resolves
- * them, then calls impl with TResolved (files).
- */
-/**
  * Label resolver function, passed to the resolve callback by rule().
  * This is the only way to resolve labels — it's not exported publicly.
  *
  * Returns `SourceArtifact` (not raw `File`) so rule implementations
- * speak in Artifacts end-to-end. Use `Rules.getFile(art)` if you
- * temporarily need the underlying `File` (e.g. for a BuildXL primitive
- * that does not yet accept Artifacts).
+ * speak in Artifacts end-to-end. Use `Rules.getFile(art)` if you need
+ * the underlying `File` (e.g. for a `Transformer.execute` call that
+ * expects `File` rather than Artifact).
  */
 @@public
 export interface LabelResolver {
