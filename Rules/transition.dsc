@@ -14,8 +14,8 @@
  *     result (idempotency contract).
  *   - The new Configuration is constructed by feeding a synthetic
  *     qualifier through `fromQualifier`. There is no back door that
- *     produces a Configuration any other way — the no-`opts` rule
- *     from Phase 1 still holds.
+ *     produces a Configuration any other way — `fromQualifier` is the
+ *     single sanctioned entry point.
  *
  * Caveat — DScript language gap:
  *   BuildXL's `withQualifier` is a *syntactic* construct on namespace

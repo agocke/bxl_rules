@@ -16,7 +16,7 @@
  * What it does NOT do:
  *   - It does not replace qualifiers; it observes them.
  *   - It does not compute its own "exec platform" — Configuration is a
- *     read-only view; transitions (Phase 2, transition.dsc) own the
+ *     read-only view; transitions (see transition.dsc) own the
  *     business of producing a new Configuration.
  *   - It does not introduce a registry: there is no "platform()" rule
  *     here. Platforms are logical names (strings) that callers attach
@@ -152,8 +152,8 @@ export namespace Platforms {
  *
  * Configuration is a pure projection of the qualifier — it cannot disagree
  * with what the rest of BuildXL sees. To produce a *different* Configuration
- * (e.g. for a cross-compile dep), apply a Transition (Phase 2); the SDK
- * is responsible for re-entering the corresponding qualifier via
+ * (e.g. for a cross-compile dep), apply a Transition (transition.dsc); the
+ * SDK is responsible for re-entering the corresponding qualifier via
  * `withQualifier` at the call site.
  */
 @@public
@@ -173,9 +173,9 @@ export function fromQualifier(q: Qualifier): Configuration {
 /**
  * Returns the logical platform label of the host machine running BuildXL.
  *
- * Used by `ExecTransition` (Phase 2) to produce the Configuration in
- * which build tools should run. This is BuildXL's analog of Buck2's
- * "default exec platform."
+ * Used by `ExecTransition` to produce the Configuration in which build
+ * tools should run. This is BuildXL's analog of Buck2's "default exec
+ * platform."
  */
 @@public
 export function hostExecPlatform(): PlatformLabel {

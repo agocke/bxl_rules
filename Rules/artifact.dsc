@@ -22,8 +22,7 @@ import {Artifact as Tx} from "Sdk.Transformers";
  * This file ports that split to DScript. Because DScript has no classes
  * and no method-on-interface syntax that captures `this`, the projection
  * is exposed as the free function `Rules.asOutput(art)` rather than as
- * an `Artifact.asOutput()` method (this matches the deferred Phase 4
- * design note in the plan).
+ * an `Artifact.asOutput()` method.
  *
  * Type taxonomy
  * -------------
@@ -59,17 +58,11 @@ import {Artifact as Tx} from "Sdk.Transformers";
  *   - All three types are tagged-interface-branded, so a bare object
  *     literal cannot satisfy them; callers must go through the factories
  *     `declareArtifact`, `sourceArtifact`, and `asOutput`.
- *   - `path: Path` is exposed because the Phase 4 Wave B `run()` adapter
- *     will need it to call `Transformer.execute({outputs: [...]})`, but
- *     rule authors must not stringify it. The materialization-boundary
- *     audit in Phase 6 covers enforcement.
- *
- * Wave A scope (this file)
- * ------------------------
- * Type shapes + factories + equality helpers, additive. The `Actions`
- * interface in providers.dsc is *not* yet rewired — that is Wave B's
- * job. Existing rules continue to use `DeclaredOutput`; Wave B replaces
- * it.
+ *   - `path: Path` is exposed because the `Actions.run` adapter needs
+ *     it to call `Transformer.execute({outputs: [...]})`, but rule
+ *     authors must not stringify it — `path` is marked `@internal` and
+ *     the command-line bridges (`cmdInput`/`cmdOutput`) are the only
+ *     sanctioned way to reference an artifact on a tool invocation.
  */
 
 // ============================================================================
@@ -197,8 +190,8 @@ export interface SourceArtifact extends Artifact {
  *
  * Holding an `OutputArtifact` represents the *intent* to bind the
  * underlying `Artifact` to a producing action. The single-use semantics
- * (one action per Output) will be runtime-enforced by Wave B's `run`
- * adapter; this Wave only models the type shape.
+ * (one action per Output) are runtime-enforced by the `Actions.run`
+ * adapter.
  *
  * Always construct via `asOutput`; never via an object literal (the
  * `__outputArtifactBrand` field is enforced).
@@ -230,10 +223,10 @@ export interface OutputArtifact {
  * output directory; it appears in `shortPath` (so command-line displays
  * are stable) and in the underlying `path`.
  *
- * Note: the plan reserves a `dir?: boolean` flag for opaque/shared-
- * opaque directories. That is deferred to Wave B because it requires
- * a different underlying BuildXL primitive (`Artifact.sharedOpaqueOutput`)
- * and tighter integration with the `Actions` API.
+ * Opaque/shared-opaque directories (a `dir?: boolean` flag) are not yet
+ * supported here; they require a different underlying BuildXL primitive
+ * (`Artifact.sharedOpaqueOutput`) and tighter integration with the
+ * `Actions` API.
  */
 @@public
 export interface DeclareArtifactOpts {
@@ -272,9 +265,9 @@ export function declareArtifact(targetDir: Directory, name: string, opts?: Decla
 /**
  * Wrap a workspace `File` as a `SourceArtifact`.
  *
- * Source files entering the framework via attribute resolution will be
- * wrapped via this factory in Wave B. Rule implementations should
- * receive `Artifact` (or `SourceArtifact`), never raw `File`.
+ * Source files entering the framework via attribute resolution are
+ * wrapped via this factory. Rule implementations should receive
+ * `Artifact` (or `SourceArtifact`), never raw `File`.
  */
 @@public
 export function sourceArtifact(file: File): SourceArtifact {
@@ -301,7 +294,7 @@ export function sourceArtifact(file: File): SourceArtifact {
  *
  * Calling `asOutput` is purely a type-level projection: each call
  * returns a *fresh* `OutputArtifact` value; the underlying `Artifact`
- * is shared. Wave B's `run` adapter will runtime-enforce the
+ * is shared. The `Actions.run` adapter runtime-enforces the
  * single-binding rule by tracking which `OutputArtifact`s have been
  * consumed.
  *
@@ -351,7 +344,7 @@ export function outputArtifactsEqual(a: OutputArtifact, b: OutputArtifact): bool
 }
 
 // ============================================================================
-//  Binding — Wave B helpers used by the Actions adapter
+//  Binding — helpers used by the Actions adapter
 // ============================================================================
 
 /**
@@ -408,7 +401,7 @@ export function getFile(art: Artifact): File {
 }
 
 // ============================================================================
-//  Command-line bridges — Phase 6 sanctioned wrappers around the
+//  Command-line bridges — sanctioned wrappers around the
 //  Sdk.Transformers.Artifact.input/output boundary.
 //
 //  Rule code should construct command lines using these helpers rather

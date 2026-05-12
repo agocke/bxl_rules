@@ -320,7 +320,7 @@ function test_getFile_returnsBoundFile_forDerived(): string {
 }
 
 // ----------------------------------------------------------------------------
-// cmdInput / cmdOutput — Phase 6 sanctioned command-line wrappers
+// cmdInput / cmdOutput — sanctioned command-line wrappers
 // ----------------------------------------------------------------------------
 
 function test_cmdInput_returnsDefinedForSource(): string {
