@@ -115,14 +115,18 @@ export namespace ConstraintSettings {
 /**
  * Common platform label constants.
  *
- * Free-form callers may use any string; these are provided for the
- * platforms BuildXL itself recognises.
+ * These are workspace-side label suggestions for callers who like
+ * Bazel-platforms ergonomics. They are *not* anchored to what
+ * BuildXL's `Context.getCurrentHost()` detects — that helper reports
+ * only `"windows" | "macos" | "unix"` for OS and `"x64" | "x86"` for
+ * CPU, so on Linux it returns `"unix"`, never `"linux"`. Workspaces
+ * are free to use any string they like; these constants only exist
+ * to avoid typos in the common cases.
  *
- * The `*X64` / `*X86` constants match what `hostExecPlatform()` can
- * produce — those are valid *exec* platforms (where build tools run).
- * The `*Arm64` constants are *target* platforms only (cross-compile
- * targets); BuildXL's `Context.getCurrentHost().cpuArchitecture` is
- * `"x64" | "x86"`, so `hostExecPlatform()` will never return arm64.
+ * Note in particular that `Platforms.linuxX64 !== hostExecPlatform()`
+ * on a Linux build host. If you want the host's label, call
+ * `hostExecPlatform()` (BuildXL vocabulary) or branch on `hostOs()`
+ * and remap to your workspace vocabulary.
  */
 export namespace Platforms {
     @@public export const linuxX64:    PlatformLabel = "linux-x64";
@@ -171,11 +175,14 @@ export function fromQualifier(q: Qualifier): Configuration {
 }
 
 /**
- * Returns the logical platform label of the host machine running BuildXL.
+ * Returns the logical platform label of the host machine running BuildXL,
+ * in BuildXL's three-bucket vocabulary (`unix-x64`, `windows-x64`,
+ * `macos-x64`, etc.).
  *
- * Used by `ExecTransition` to produce the Configuration in which build
- * tools should run. This is BuildXL's analog of Buck2's "default exec
- * platform."
+ * Useful as the input to `makeExecTransition` when the workspace's
+ * qualifier matrix uses BuildXL's vocabulary directly. Workspaces using
+ * Bazel-style labels (`linux`, `freebsd`, ...) must remap `hostOs()`
+ * themselves — BuildXL doesn't expose finer detection.
  */
 @@public
 export function hostExecPlatform(): PlatformLabel {
@@ -189,13 +196,12 @@ export function hostExecPlatform(): PlatformLabel {
  * own three-way `OsType` (`"win" | "macOS" | "unix"`), modulo the
  * casing normalisation. BuildXL itself does not distinguish Linux,
  * FreeBSD, OpenBSD, or any other Unix flavour — `getCurrentHost().os`
- * returns `"unix"` for all of them. Callers that need finer
- * granularity must override via the `os` qualifier axis explicitly
- * (e.g. `bxl /q:os=freebsd;cpu=x64`), since the SDK can't detect what
- * BuildXL won't tell it.
+ * returns `"unix"` for all of them. Workspaces that need finer
+ * granularity must remap `hostOs()` themselves (or accept `unix` as
+ * their host label).
  *
- * Used by `ExecTransition` to populate the synthetic exec qualifier's
- * `os` axis.
+ * Typical use: `makeExecTransition({ os: hostOs(), cpu: hostCpu() })`
+ * for a workspace whose qualifier matrix uses BuildXL's vocabulary.
  */
 @@public
 export function hostOs(): string {
@@ -210,11 +216,9 @@ export function hostOs(): string {
  *
  * Output domain: `"x64" | "x86"` — BuildXL's `cpuArchitecture` is
  * statically that union, so `hostCpu()` will never return arm64.
- * Workspaces targeting arm64 host machines must set `cpu` explicitly
- * on the qualifier.
+ * Workspaces targeting arm64 host machines must remap themselves.
  *
- * Used by `ExecTransition` to populate the synthetic exec qualifier's
- * `cpu` axis.
+ * Typical use: paired with `hostOs()` as input to `makeExecTransition`.
  */
 @@public
 export function hostCpu(): string {

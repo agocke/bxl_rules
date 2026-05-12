@@ -289,7 +289,7 @@ const defaultToolchain: CSharpToolchain = {
 
 The toolchain is declared in the rule definition and passed to `impl` via `ctx.toolchain`. Callers never see or configure it.
 
-> **Future direction (currently blocked).** In Buck2, toolchains are top-level targets resolved via `attrs.exec_dep(...)`, which lets call-sites pick a toolchain instance per target and the framework apply the appropriate `ExecTransition`. The bxl_rules plan reserves the same shape, but BuildXL's `importFrom` requires a string-literal module name, which precludes value-level toolchain resolution. The current "field on the rule definition" shape stays in place until BuildXL exposes a value-level `importByName`.
+> **Future direction (currently blocked).** In Buck2, toolchains are top-level targets resolved via `attrs.exec_dep(...)`, which lets call-sites pick a toolchain instance per target and the framework apply the appropriate exec transition. The bxl_rules plan reserves the same shape, but BuildXL's `importFrom` requires a string-literal module name, which precludes value-level toolchain resolution. The current "field on the rule definition" shape stays in place until BuildXL exposes a value-level `importByName`.
 
 ### Depset (Transitive Dependencies)
 
@@ -348,15 +348,16 @@ Predefined platform labels live under `Rules.Platforms.*` (e.g., `Rules.Platform
 
 ```typescript
 const targetCfg = Rules.fromQualifier(qualifier);
-const execCfg   = Rules.ExecTransition.apply(targetCfg);
-// execCfg.platform    === Rules.hostExecPlatform()  (where build tools run)
+const myExec    = Rules.makeExecTransition({ os: "linux", cpu: "x64" });
+const execCfg   = myExec.apply(targetCfg);
+// execCfg.platform    === "linux-x64"  (where build tools run)
 // execCfg preserves the mode constraint, drops target-specific ones
 ```
 
 Predefined transitions:
 - `Rules.IdentityTransition` — no-op; same Configuration as the consumer.
 - `Rules.TargetTransition` — alias of identity. Use for readability when documenting "this dep stays in the target config."
-- `Rules.ExecTransition` — switch to the host's exec platform. For build tools that must run on the build machine.
+- `Rules.makeExecTransition({os, cpu})` — factory for an exec transition that switches to the supplied host labels. Workspace owners construct one near the qualifier declaration; see *Configuring the exec transition* below.
 
 Transitions are **idempotent**: applying twice equals applying once. This matches Buck2's enforced contract.
 
@@ -397,18 +398,27 @@ const isArm64 = Rules.getConstraint(cfg, Rules.ConstraintSettings.cpu) === "arm6
 
 **One key difference from Bazel.** Bazel's `@platforms` workspace ships the canonical OS/CPU constraint values (`@platforms//os:linux`, etc.), and any platform target your project defines just references those labels. We can't ship the equivalent: BuildXL requires the qualifier *type* to be declared per-workspace as a union of string literals (so the engine can enumerate the build matrix), and there's no DScript syntax for an SDK to inject a type into your namespace. Hence the paste-once snippet above. The OS/CPU label vocabulary inside it is a soft convention — pick whatever values you like, just stay consistent across your modules.
 
-**Custom host labels for `ExecTransition`.** `Rules.ExecTransition` (the singleton) reports the host using BuildXL's three-bucket OS (`win` / `macOS` / `unix`), which is all `Context.getCurrentHost()` exposes — so on Linux, FreeBSD, or Haiku it reports `unix`. If your workspace's qualifier vocabulary uses finer labels (e.g., `os: "linux" | "freebsd"`), the singleton's emitted qualifier won't match the workspace type. Use `Rules.makeExecTransition({os, cpu})` to pin the host labels in code:
+**Configuring the exec transition.** There is no global `ExecTransition` singleton, because the SDK can't know which OS-label vocabulary your workspace uses. BuildXL's `Context.getCurrentHost()` reports only `win`/`macOS`/`unix` for OS (so Linux/FreeBSD/Haiku all collapse to `unix`) and `x64`/`x86` for CPU — useful raw input, but it won't match a qualifier matrix that says `os: "linux" | "freebsd" | ...`. Workspaces construct their own exec transition with the labels their qualifier accepts:
 
 ```typescript
-const myExec = Rules.makeExecTransition({ os: "linux", cpu: "x64" });
-const execCfg = myExec.apply(targetCfg);
+// Workspace using BuildXL's vocabulary directly:
+const ExecTransition = Rules.makeExecTransition({ os: Rules.hostOs(), cpu: Rules.hostCpu() });
+
+// Workspace using Bazel-style labels — remap `hostOs()` once:
+const hostOsForWorkspace =
+    Rules.hostOs() === "unix"    ? "linux"   :  // or branch finer if you care
+    Rules.hostOs() === "macos"   ? "macos"   :
+    /* "windows" */                "windows";
+const ExecTransition = Rules.makeExecTransition({ os: hostOsForWorkspace, cpu: Rules.hostCpu() });
 ```
+
+Then use the resulting `ExecTransition` value the same way everywhere — e.g. `ExecTransition.apply(targetCfg)`.
 
 **Scope of a Transition.** BuildXL's `withQualifier` is a *syntactic* construct on namespace imports, not a value-level call. A Transition value therefore produces the new Configuration but cannot itself invoke `withQualifier`. The division of labour:
 
 ```typescript
 // SDK side: compute the new Configuration as a value.
-const newCfg = Rules.ExecTransition.apply(currentCfg);
+const newCfg = ExecTransition.apply(currentCfg);
 
 // Call site: write the import yourself.
 import * as Tool from "Tool" withQualifier(newCfg.underlyingQualifier);
@@ -457,7 +467,7 @@ If you know Bazel, here's the quick correspondence:
 | `select()` | `select()` |
 | `Configuration` (Bazel/Buck2 platform info) | `Configuration` |
 | `transition()` | `Transition` (value, not a string) |
-| `cfg = "exec"` (Bazel) / `cfg.exec` (Buck2) | `Rules.ExecTransition` |
+| `cfg = "exec"` (Bazel) / `cfg.exec` (Buck2) | `Rules.makeExecTransition({os, cpu})` (no singleton: workspaces declare their host vocabulary) |
 | `visibility = ["//visibility:public"]` | `@@public export` |
 | Starlark (Python-like) | DScript (TypeScript-like) |
 
@@ -471,8 +481,7 @@ bxl_rules/
 │   ├── configuration.dsc       — Configuration, fromQualifier, hostExecPlatform,
 │   │                             Platforms.*, ConstraintSettings.*
 │   ├── transition.dsc          — Transition, IdentityTransition,
-│   │                             TargetTransition, ExecTransition,
-│   │                             makeExecTransition
+│   │                             TargetTransition, makeExecTransition
 │   ├── artifact.dsc            — Artifact, SourceArtifact,
 │   │                             declareArtifact, sourceArtifact,
 │   │                             bindArtifact, getFile, cmdInput, cmdOutput

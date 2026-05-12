@@ -44,96 +44,11 @@ function test_targetTransition_isIdentityAlias(): string {
 }
 
 // ----------------------------------------------------------------------------
-// ExecTransition
+// ExecTransition was removed (it was a footgun: BuildXL detects `os: "unix"`
+// on Linux, but workspaces typically declare `os: "linux"` in their qualifier
+// matrix, causing a silent mismatch). All exec-transition tests now exercise
+// `makeExecTransition({ os, cpu })` directly — see the section below.
 // ----------------------------------------------------------------------------
-
-function test_execTransition_producesHostPlatform(): string {
-    // Start from a non-host platform so we can observe the switch.
-    const targetCfg = Rules.fromQualifier({ platform: "linux-arm64" });
-    const execCfg   = Rules.ExecTransition.apply(targetCfg);
-
-    Contract.assert(execCfg.platform === Rules.hostExecPlatform(),
-        "ExecTransition must switch the platform to hostExecPlatform()");
-
-    return "ok";
-}
-
-function test_execTransition_isIdempotent(): string {
-    const cfg   = Rules.fromQualifier({ platform: "linux-arm64", configuration: "release" });
-    const once  = Rules.ExecTransition.apply(cfg);
-    const twice = Rules.ExecTransition.apply(once);
-
-    Contract.assert(Rules.configurationsEqual(once, twice),
-        "ExecTransition applied twice must equal applied once (idempotency contract)");
-
-    return "ok";
-}
-
-function test_execTransition_preservesModeConstraint(): string {
-    const cfg     = Rules.fromQualifier({ platform: "linux-arm64", configuration: "debug" });
-    const execCfg = Rules.ExecTransition.apply(cfg);
-
-    Contract.assert(Rules.getConstraint(execCfg, Rules.ConstraintSettings.mode) === "debug",
-        "ExecTransition must preserve the mode constraint (debug/release of the build)");
-
-    return "ok";
-}
-
-function test_execTransition_dropsTargetSpecificConstraints(): string {
-    // ExecTransition rewrites os/cpu to the host bucket and preserves the
-    // mode (which is the only target-side constraint that should survive an
-    // exec transition). Constraints that don't come from a qualifier axis
-    // the SDK recognises (i.e., anything beyond os/cpu/mode) are not
-    // representable through `fromQualifier`, so the post-conditions below
-    // are: os == hostOs(), cpu == hostCpu(), no mode entry.
-    const cfg     = Rules.fromQualifier({ platform: "linux-arm64" });
-    const execCfg = Rules.ExecTransition.apply(cfg);
-
-    Contract.assert(execCfg.platform === Rules.hostExecPlatform(),
-        "platform should be host");
-    Contract.assert(Rules.getConstraint(execCfg, Rules.ConstraintSettings.os) === Rules.hostOs(),
-        "exec config must carry the host os as a constraint");
-    Contract.assert(Rules.getConstraint(execCfg, Rules.ConstraintSettings.cpu) === Rules.hostCpu(),
-        "exec config must carry the host cpu as a constraint");
-    Contract.assert(Rules.getConstraint(execCfg, Rules.ConstraintSettings.mode) === undefined,
-        "no mode constraint in the input => no mode constraint in the output");
-
-    return "ok";
-}
-
-function test_execTransition_doesNotMutateInput(): string {
-    const cfg = Rules.fromQualifier({ platform: "linux-arm64", configuration: "release" });
-    const beforeHash = cfg.hash;
-
-    Rules.ExecTransition.apply(cfg); // discard result
-
-    Contract.assert(cfg.hash === beforeHash,
-        "ExecTransition.apply must not mutate its input Configuration");
-    Contract.assert(cfg.platform === "linux-arm64",
-        "input Configuration's platform must be unchanged");
-
-    return "ok";
-}
-
-function test_execTransition_carriesUsableQualifier(): string {
-    // Contract: the .underlyingQualifier field on the new Configuration is what
-    // the call site will pass to `withQualifier(...)`. It must reflect
-    // the new platform, not the old one.
-    const cfg     = Rules.fromQualifier({ platform: "linux-arm64", configuration: "debug" });
-    const execCfg = Rules.ExecTransition.apply(cfg);
-
-    const q = <{ os?: string; cpu?: string; configuration?: string; }><any>execCfg.underlyingQualifier;
-    // ExecTransition (singleton) uses BuildXL's detected host labels, so
-    // we compare with the helpers rather than hard-coding "linux"/etc.
-    Contract.assert(q.os === Rules.hostOs(),
-        "execCfg.underlyingQualifier.os must equal the host os label");
-    Contract.assert(q.cpu === Rules.hostCpu(),
-        "execCfg.underlyingQualifier.cpu must equal the host cpu label");
-    Contract.assert(q.configuration === "debug",
-        "execCfg.underlyingQualifier.configuration must carry the preserved mode");
-
-    return "ok";
-}
 
 // ----------------------------------------------------------------------------
 // makeExecTransition — factory with explicit host labels
@@ -165,7 +80,7 @@ function test_makeExecTransition_preservesMode(): string {
 
     const execCfg = myExec.apply(cfg);
     Contract.assert(Rules.getConstraint(execCfg, Rules.ConstraintSettings.mode) === "release",
-        "makeExecTransition must preserve the mode constraint just like the singleton");
+        "makeExecTransition must preserve the mode constraint");
 
     return "ok";
 }
@@ -179,6 +94,57 @@ function test_makeExecTransition_isIdempotent(): string {
 
     Contract.assert(Rules.configurationsEqual(once, twice),
         "makeExecTransition produces an idempotent transition");
+
+    return "ok";
+}
+
+function test_makeExecTransition_dropsTargetSpecificConstraints(): string {
+    // The transition rewrites os/cpu to the supplied host labels and
+    // preserves only the mode constraint (the only target-side constraint
+    // that should survive an exec transition). When the input has no mode,
+    // the output should have no mode either.
+    const myExec  = Rules.makeExecTransition({ os: "linux", cpu: "x64" });
+    const cfg     = Rules.fromQualifier({ os: "linux", cpu: "arm64" });
+    const execCfg = myExec.apply(cfg);
+
+    Contract.assert(execCfg.platform === "linux-x64",
+        "platform should be <suppliedOs>-<suppliedCpu>");
+    Contract.assert(Rules.getConstraint(execCfg, Rules.ConstraintSettings.mode) === undefined,
+        "no mode in => no mode out");
+
+    return "ok";
+}
+
+function test_makeExecTransition_doesNotMutateInput(): string {
+    const myExec    = Rules.makeExecTransition({ os: "linux", cpu: "x64" });
+    const cfg       = Rules.fromQualifier({ os: "linux", cpu: "arm64", configuration: "release" });
+    const beforeHash = cfg.hash;
+
+    myExec.apply(cfg); // discard result
+
+    Contract.assert(cfg.hash === beforeHash,
+        "Transition.apply must not mutate its input Configuration");
+    Contract.assert(Rules.getConstraint(cfg, Rules.ConstraintSettings.cpu) === "arm64",
+        "input Configuration's cpu constraint must be unchanged");
+
+    return "ok";
+}
+
+function test_makeExecTransition_carriesUsableQualifier(): string {
+    // Contract: the .underlyingQualifier field on the new Configuration is what
+    // the call site passes to `withQualifier(...)`. It must reflect the
+    // supplied host labels, not the input.
+    const myExec  = Rules.makeExecTransition({ os: "linux", cpu: "x64" });
+    const cfg     = Rules.fromQualifier({ os: "linux", cpu: "arm64", configuration: "debug" });
+    const execCfg = myExec.apply(cfg);
+
+    const q = <{ os?: string; cpu?: string; configuration?: string; }><any>execCfg.underlyingQualifier;
+    Contract.assert(q.os === "linux",
+        "execCfg.underlyingQualifier.os must equal the supplied os label");
+    Contract.assert(q.cpu === "x64",
+        "execCfg.underlyingQualifier.cpu must equal the supplied cpu label");
+    Contract.assert(q.configuration === "debug",
+        "execCfg.underlyingQualifier.configuration must carry the preserved mode");
 
     return "ok";
 }
@@ -230,15 +196,12 @@ function test_fromQualifier_legacyPlatformFieldStillWorks(): string {
 @@public export const tt01 = test_identityTransition_returnsInputUnchanged();
 @@public export const tt02 = test_identityTransition_isIdempotent();
 @@public export const tt03 = test_targetTransition_isIdentityAlias();
-@@public export const tt04 = test_execTransition_producesHostPlatform();
-@@public export const tt05 = test_execTransition_isIdempotent();
-@@public export const tt06 = test_execTransition_preservesModeConstraint();
-@@public export const tt07 = test_execTransition_dropsTargetSpecificConstraints();
-@@public export const tt08 = test_execTransition_doesNotMutateInput();
-@@public export const tt09 = test_execTransition_carriesUsableQualifier();
-@@public export const tt10 = test_makeExecTransition_usesSuppliedLabels();
-@@public export const tt11 = test_makeExecTransition_preservesMode();
-@@public export const tt12 = test_makeExecTransition_isIdempotent();
-@@public export const tt13 = test_fromQualifier_readsOsAndCpuIndependently();
-@@public export const tt14 = test_fromQualifier_osPlusCpuSynthesisesPlatform();
-@@public export const tt15 = test_fromQualifier_legacyPlatformFieldStillWorks();
+@@public export const tt04 = test_makeExecTransition_usesSuppliedLabels();
+@@public export const tt05 = test_makeExecTransition_preservesMode();
+@@public export const tt06 = test_makeExecTransition_isIdempotent();
+@@public export const tt07 = test_makeExecTransition_dropsTargetSpecificConstraints();
+@@public export const tt08 = test_makeExecTransition_doesNotMutateInput();
+@@public export const tt09 = test_makeExecTransition_carriesUsableQualifier();
+@@public export const tt10 = test_fromQualifier_readsOsAndCpuIndependently();
+@@public export const tt11 = test_fromQualifier_osPlusCpuSynthesisesPlatform();
+@@public export const tt12 = test_fromQualifier_legacyPlatformFieldStillWorks();

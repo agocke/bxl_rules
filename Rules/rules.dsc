@@ -9,7 +9,9 @@
  *                           (a view over a BuildXL qualifier)
  *   - fromQualifier       — the only sanctioned Configuration factory
  *   - Transition          — pure Configuration→Configuration function (branded)
- *   - IdentityTransition / TargetTransition / ExecTransition — predefined
+ *   - IdentityTransition / TargetTransition — predefined transitions
+ *   - makeExecTransition({os, cpu}) — factory for an exec transition
+ *     with workspace-specific host labels
  *
  * Artifact model (artifact.dsc):
  *   - Artifact            — referenceable handle (may be unbound)

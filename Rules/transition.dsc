@@ -108,15 +108,18 @@ export const TargetTransition: Transition = IdentityTransition;
  * Idempotency: applying twice is a no-op because the second application
  * sees a Configuration whose `os`/`cpu` already equal the supplied host's.
  *
- * Why a factory instead of a singleton: workspaces vary in the
- * vocabulary they use for host labels (some say `os: "linux"`, others
- * say `os: "unix"` to match BuildXL's three-bucket `OsType`). The SDK
- * doesn't know which vocabulary your qualifier matrix declares —
- * picking one would silently misalign with workspaces using the other.
- * The workspace owner constructs `makeExecTransition` once with their
- * own labels, typically near the qualifier declaration. See also the
- * convenience `ExecTransition` singleton, which is `makeExecTransition`
- * applied to BuildXL's auto-detected labels.
+ * Why a factory and not a singleton: workspaces vary in the
+ * vocabulary they use for host labels — some say `os: "linux"` (Bazel
+ * shape), others say `os: "unix"` (BuildXL's three-bucket `OsType`).
+ * The SDK doesn't know which vocabulary your qualifier matrix
+ * declares; picking one in a global singleton would silently misalign
+ * with the other half of consumers. A workspace owner constructs
+ * `makeExecTransition` once near the qualifier declaration with the
+ * matching labels — for BuildXL-vocabulary workspaces that's
+ * `makeExecTransition({ os: Rules.hostOs(), cpu: Rules.hostCpu() })`;
+ * for Bazel-vocabulary workspaces it's typically a small branch on
+ * `Rules.hostOs()` ("unix" → "linux" / "freebsd" / etc.) before
+ * passing to the factory.
  *
  * @param host  The host platform's `os` and `cpu` labels. These must
  *              match values that the workspace's qualifier type accepts
@@ -137,23 +140,3 @@ export function makeExecTransition(host: { os: string; cpu: string; }): Transiti
         },
     };
 }
-
-/**
- * Auto-host `ExecTransition`: applies `makeExecTransition` to the
- * labels BuildXL itself detects via `Context.getCurrentHost()`.
- *
- * Convenient for workspaces whose qualifier vocabulary matches
- * BuildXL's own (`os: "windows" | "macos" | "unix"`). Workspaces that
- * use finer-grained labels (e.g. `"linux"`, `"freebsd"`, `"haiku"`) or
- * that need to set CPU explicitly must construct their own transition
- * via `makeExecTransition({os, cpu})` — BuildXL's detection is only
- * three-way on OS and `"x64" | "x86"` on CPU, so any other label is
- * the workspace's call.
- *
- * Caveat: BuildXL reports `"unix"` for all non-Windows non-macOS hosts,
- * so on Linux this transition produces `os: "unix"`. If your qualifier
- * matrix declares `os: "linux" | ...`, you want `makeExecTransition`,
- * not this singleton.
- */
-@@public
-export const ExecTransition: Transition = makeExecTransition({ os: hostOs(), cpu: hostCpu() });

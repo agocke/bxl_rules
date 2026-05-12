@@ -9,7 +9,7 @@ If a section says "no change required", it's listed only so you can verify your 
 ## Quick checklist
 
 - [ ] Replace `qualifier.<field>` reads with `Rules.fromQualifier(qualifier)` + `Rules.getConstraint(...)`.
-- [ ] Replace static `cfg = "exec"` patterns with `Rules.ExecTransition.apply(cfg)`.
+- [ ] Replace static `cfg = "exec"` patterns with `Rules.makeExecTransition({os, cpu}).apply(cfg)` — construct the transition once per workspace with your host labels (there's no global singleton).
 - [ ] Update `LabelResolver` consumers — `resolver.resolve(label)` now returns `SourceArtifact`, not `File`.
 - [ ] Update rule `resolve` types — `srcs: File[]` → `srcs: SourceArtifact[]`.
 - [ ] Replace `ctx.actions.declareFile(name)` with `ctx.actions.declareOutput(name)` (returns `Artifact`, not `DerivedFile`).
@@ -49,15 +49,22 @@ Why: `Configuration` is the single source of truth for build settings. The quali
 const codegenDep = { label: "//tools:codegen", cfg: "exec" };
 ```
 
-**After** — apply a Transition value to compute the new Configuration; then use its `underlyingQualifier` at the dep-import site:
+**After** — construct an exec transition with your workspace's host labels, then apply it and use its `underlyingQualifier` at the dep-import site:
 
 ```typescript
+// Once per workspace (e.g. in a shared module):
+export const ExecTransition = Rules.makeExecTransition({
+    os:  Rules.hostOs(),   // or remap to your vocabulary if it isn't "unix"/"macos"/"windows"
+    cpu: Rules.hostCpu(),
+});
+
+// At each call site:
 const targetCfg = Rules.fromQualifier(qualifier);
-const execCfg   = Rules.ExecTransition.apply(targetCfg);
+const execCfg   = ExecTransition.apply(targetCfg);
 import * as Codegen from "Codegen" withQualifier(execCfg.underlyingQualifier);
 ```
 
-`Rules.IdentityTransition` / `Rules.TargetTransition` / `Rules.ExecTransition` are the predefined transitions. Custom ones can be defined as `<Transition>{ name, apply: cfg => ... }` and must be idempotent.
+`Rules.IdentityTransition` / `Rules.TargetTransition` are the predefined no-op transitions. `Rules.makeExecTransition({os, cpu})` is a factory for the exec case; the SDK does **not** ship a singleton because it can't know your qualifier vocabulary (BuildXL's `Context.getCurrentHost()` reports `unix` for Linux/FreeBSD/Haiku and `x64`/`x86` only — so a global singleton would silently mismatch any workspace declaring `os: "linux"` in its qualifier matrix). Custom transitions can be defined as `<Transition>{ name, apply: cfg => ... }` and must be idempotent.
 
 **Scope:** BuildXL's `withQualifier` is syntactic, so the dep-import side stays manual:
 
