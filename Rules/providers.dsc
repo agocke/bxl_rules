@@ -261,12 +261,18 @@ export interface RunArgs {
  * Analogous to Bazel's `ctx` — provides access to resolved attributes,
  * the toolchain, and action helpers.
  *
- * TResolved is the post-resolution type: label fields have been
- * transformed to File[] before impl is called.
+ * `TResolved` is the post-resolution type: label fields have been
+ * transformed by `defn.resolve` before `impl` is called. Labels become
+ * `SourceArtifact[]` (via `LabelResolver.resolveAll`) — never raw
+ * `File[]` — so rule implementations speak in Artifacts end-to-end.
  */
 @@public
 export interface RuleContext<TResolved, TToolchain extends Toolchain> {
-    /** The resolved rule attributes. Label fields are already File[]. */
+    /**
+     * The resolved rule attributes. Label fields are `SourceArtifact[]`
+     * (or `SourceArtifact` for single-label fields) after `defn.resolve`
+     * has been applied.
+     */
     args: TResolved;
 
     /** The resolved toolchain instance. */

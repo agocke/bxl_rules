@@ -43,10 +43,13 @@
 /**
  * A pure function from Configuration to Configuration.
  *
- * Idempotency: `t.apply(t.apply(cfg))` must equal `t.apply(cfg)`. This
- * matches Buck2's enforced transition contract and ensures that
- * re-applying a transition (e.g. an exec dep of an exec dep) doesn't
- * keep migrating the configuration.
+ * Idempotency: `t.apply(t.apply(cfg))` *should* equal `t.apply(cfg)`.
+ * Buck2 enforces this by re-applying every transition and comparing
+ * results; we leave it as a documented convention because DScript has
+ * no decorator/wrapper hook to intercept arbitrary `apply` calls
+ * cheaply. The predefined `IdentityTransition`/`TargetTransition` and
+ * the `makeExecTransition` factory are idempotent by construction;
+ * custom Transition values are the author's responsibility.
  */
 @@public
 export interface Transition {

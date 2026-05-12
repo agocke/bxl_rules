@@ -207,9 +207,47 @@ function test_hostExecPlatform_isWellFormed(): string {
     return "ok";
 }
 
-// ============================================================================
-// Test exports — top-level evaluation runs each test exactly once.
-// ============================================================================
+// ----------------------------------------------------------------------------
+// Pass-through of unknown qualifier axes
+// ----------------------------------------------------------------------------
+
+function test_fromQualifier_passesThroughUnknownAxes(): string {
+    // Two qualifiers identical on the well-known axes (os/cpu) but
+    // differing on an unknown axis (`tfm`) must produce Configurations
+    // with different hashes — otherwise `select()`-style dispatch on the
+    // unknown axis would silently collapse.
+    const cfg8 = Rules.fromQualifier(<Qualifier><any>{ os: "linux", cpu: "x64", tfm: "net8.0" });
+    const cfg9 = Rules.fromQualifier(<Qualifier><any>{ os: "linux", cpu: "x64", tfm: "net9.0" });
+
+    Contract.assert(cfg8.hash !== cfg9.hash,
+        "qualifiers differing on a non-well-known axis must produce distinct Configuration hashes");
+
+    const tfm8 = Rules.getConstraint(cfg8, "tfm");
+    const tfm9 = Rules.getConstraint(cfg9, "tfm");
+    Contract.assert(tfm8 === "net8.0",
+        `getConstraint should expose the unknown axis verbatim; got "${tfm8}"`);
+    Contract.assert(tfm9 === "net9.0",
+        `getConstraint should expose the unknown axis verbatim; got "${tfm9}"`);
+
+    return "ok";
+}
+
+function test_fromQualifier_configurationFieldRenamesToMode(): string {
+    // The qualifier-side field name `configuration` is renamed to the
+    // constraint setting `mode` for backward compatibility — verify the
+    // pass-through layer preserves that rename rather than emitting a
+    // bare `configuration` constraint.
+    const cfg = Rules.fromQualifier(<Qualifier><any>{ configuration: "release" });
+
+    Contract.assert(Rules.getConstraint(cfg, Rules.ConstraintSettings.mode) === "release",
+        "qualifier.configuration must surface as the 'mode' constraint");
+    Contract.assert(Rules.getConstraint(cfg, "configuration") === undefined,
+        "qualifier.configuration must NOT appear under the literal 'configuration' setting name");
+
+    return "ok";
+}
+
+
 
 @@public export const t01 = test_fromQualifier_emptyDefaultsToHost();
 @@public export const t02 = test_fromQualifier_readsPlatformField();
@@ -224,3 +262,5 @@ function test_hostExecPlatform_isWellFormed(): string {
 @@public export const t11 = test_configurationsEqual_undefinedSafety();
 @@public export const t12 = test_hostExecPlatform_isWellFormed();
 @@public export const t13 = test_hashIsCollisionResistantToDelimiters();
+@@public export const t14 = test_fromQualifier_passesThroughUnknownAxes();
+@@public export const t15 = test_fromQualifier_configurationFieldRenamesToMode();

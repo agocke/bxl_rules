@@ -12,7 +12,6 @@ import {Artifact as Tx, Cmd, Transformer} from "Sdk.Transformers";
  *
  * Usage:
  *   import * as Rules from "Sdk.Rules";
- *   import {Artifact, Cmd} from "Sdk.Transformers";
  *
  *   const generated = Rules.genrule({
  *       name: "codegen",
@@ -22,12 +21,19 @@ import {Artifact as Tx, Cmd, Transformer} from "Sdk.Transformers";
  *           exe: f`tools/protoc`,
  *       },
  *       cmd: (ctx) => [
- *           Cmd.argument(Artifact.input(Rules.getFile(ctx.srcs[0]))),
- *           Cmd.option("--csharp_out=", Artifact.output(ctx.outs[0].artifact.path)),
+ *           Cmd.argument(Rules.cmdInput(ctx.srcs[0])),
+ *           Cmd.option("--csharp_out=", Rules.cmdOutput(ctx.outs[0])),
  *       ],
  *   });
  *
  *   // Use generated.outs[0] (a bound Artifact) downstream.
+ *
+ * Single-binding within a single genrule call: `args.outs` must not
+ * contain duplicate atoms — declaring the same output name twice would
+ * produce two unbound Artifacts pointing at the same path, both passed
+ * to BuildXL as implicit outputs of one pip. The SDK rejects this at
+ * call time. Cross-target collisions still fall to BuildXL's
+ * pip-graph layer.
  */
 
 // ============================================================================
@@ -123,7 +129,15 @@ export interface GenruleResult {
 export function genrule(args: GenruleArguments): GenruleResult {
     const outDir = Context.getNewOutputDirectory(args.name);
     const srcs = args.srcs || [];
-    const declaredOuts = args.outs.map(name => declareArtifact(outDir, name.toString()));
+
+    const seenOuts = MutableSet.empty<string>();
+    const declaredOuts = args.outs.map(name => {
+        const k = name.toString();
+        Contract.requires(!seenOuts.contains(k),
+            `genrule "${args.name}": duplicate output "${k}" in outs[]; each declared output name must be unique within a single genrule call.`);
+        seenOuts.add(k);
+        return declareArtifact(outDir, k);
+    });
 
     const ctx: GenruleCmdContext = {
         srcs: srcs,
@@ -228,12 +242,23 @@ export interface CopyFilesArguments {
 /**
  * Copy a set of Artifacts to a shared output directory, preserving
  * their leaf names. Returns bound Artifacts.
+ *
+ * Two source paths with the same leaf name would collide on the same
+ * destination path under the shared output directory; the SDK rejects
+ * this at call time. If you need to copy two sources whose leaf names
+ * collide, use `copy_file` separately (with explicit `out` atoms) or
+ * split them into two `copy_files` calls with different `name`s.
  */
 @@public
 export function copy_files(args: CopyFilesArguments): Artifact[] {
     const outDir = Context.getNewOutputDirectory(args.name);
+    const seenLeaves = MutableSet.empty<string>();
     return args.srcs.map(src => {
-        const declared = declareArtifact(outDir, src.path.name.toString());
+        const leafName = src.path.name.toString();
+        Contract.requires(!seenLeaves.contains(leafName),
+            `copy_files "${args.name}": two sources share the leaf name "${leafName}"; copies under a shared output directory must have unique leaf names. Use copy_file with explicit out atoms or split into multiple copy_files calls.`);
+        seenLeaves.add(leafName);
+        const declared = declareArtifact(outDir, leafName);
         const sourceFile = getFile(src);
         const f = Transformer.copyFile(sourceFile, declared.path);
         // SAFETY: see copy_file above.

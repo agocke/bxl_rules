@@ -149,10 +149,19 @@ export namespace Platforms {
  *   const cfg = Config.fromQualifier(qualifier);
  *
  * Derivations (the qualifier IS the source of truth — there are no overrides):
- *   - `platform` ← `qualifier.platform`, then `qualifier.targetRuntime`,
- *     else the host's exec platform.
- *   - `constraints` ← `[{setting: "mode", value: qualifier.configuration}]`
- *     when `qualifier.configuration` is present.
+ *   - `platform` ← independent `os`+`cpu` axes (joined as `<os>-<cpu>`),
+ *     then `qualifier.platform`, then `qualifier.targetRuntime`, else the
+ *     host's exec platform. This is a diagnostic/output-directory label
+ *     only; it does not influence Configuration identity beyond what the
+ *     underlying axes already contribute.
+ *   - `constraints` ← *every* field on the qualifier becomes a
+ *     `ConstraintEntry`. The setting names `os`, `cpu`, and `mode`
+ *     (the latter renamed from `configuration`) are well-known and
+ *     have constants in `ConstraintSettings`; any other axis the
+ *     workspace declares (`tfm`, `runtime`, `libc`, `abi`, ...) is
+ *     passed through verbatim with the qualifier field name as the
+ *     setting name. Two qualifiers that differ on *any* field will
+ *     produce Configurations with different hashes.
  *
  * Configuration is a pure projection of the qualifier — it cannot disagree
  * with what the rest of BuildXL sees. To produce a *different* Configuration
@@ -260,21 +269,21 @@ export function configurationsEqual(a: Configuration, b: Configuration): boolean
 // ============================================================================
 
 /**
- * Best-effort platform derivation. Three shapes are recognised, in
- * priority order:
+ * Best-effort platform derivation, for diagnostics and output-directory
+ * naming only. Three shapes are recognised, in priority order:
  *
  *   1. Independent `os` + `cpu` axes — the *Bazel-shaped* qualifier.
- *      Synthesises a combined label `<os>-<cpu>` for diagnostics and
- *      output-directory naming.
+ *      Synthesises a combined label `<os>-<cpu>`.
  *   2. Combined `platform` field — the *legacy bundle* shape.
  *   3. `targetRuntime` — older BuildXL conventions.
  *
  * Falling back to the host exec platform if none of the above are set.
  *
- * The combined `cfg.platform` is now a *derived convenience field*;
- * the genuine independent dimensions live in `cfg.constraints` and
- * should be queried via `getConstraint(cfg, ConstraintSettings.os)`
- * and `getConstraint(cfg, ConstraintSettings.cpu)`.
+ * The combined `cfg.platform` is a *derived convenience field*; the
+ * genuine independent dimensions live in `cfg.constraints` (which now
+ * carries every qualifier field, not just the three the platform
+ * derivation knows about). Query with
+ * `getConstraint(cfg, ConstraintSettings.os)` etc.
  */
 function derivePlatformFromQualifier(q: Qualifier): PlatformLabel {
     const anyQ = <{platform?: string; targetRuntime?: string; os?: string; cpu?: string;}>q;
@@ -285,25 +294,40 @@ function derivePlatformFromQualifier(q: Qualifier): PlatformLabel {
 }
 
 /**
- * Best-effort constraint derivation. Each recognised axis on the
- * qualifier becomes one `ConstraintEntry`:
+ * Build the constraint list from *every* field on the qualifier.
  *
- *   qualifier.os            -> {setting: "os",   value: ...}
- *   qualifier.cpu           -> {setting: "cpu",  value: ...}
- *   qualifier.configuration -> {setting: "mode", value: ...}
+ * The qualifier is the source of truth for build identity: anything the
+ * workspace declares as part of its qualifier matrix participates in
+ * dispatch. Restricting the projection to a hand-picked allowlist
+ * (`os`, `cpu`, `configuration`) silently collapsed Configurations that
+ * differed only on an unknown axis (e.g. `tfm`, `runtime`, `libc`,
+ * `abi`), so two qualifiers `{os, cpu, tfm: "net8.0"}` and
+ * `{os, cpu, tfm: "net9.0"}` would hash equal.
  *
- * Workspaces using the legacy combined `platform` qualifier field can
- * still match on "is this arm64?" by branching on `cfg.platform`
- * directly, but the recommended shape is to declare `os` and `cpu` as
- * independent axes so each is independently queryable via
- * `getConstraint`.
+ * Naming conventions for setting names:
+ *   - `qualifier.configuration` is renamed to the constraint setting
+ *     `mode` for backward compatibility with rule code that already
+ *     reads `getConstraint(cfg, ConstraintSettings.mode)`. (The
+ *     qualifier-side name `configuration` is reserved by older
+ *     BuildXL conventions; the constraint-side name `mode` is shorter
+ *     and matches Bazel.)
+ *   - All other fields pass through verbatim — the qualifier field
+ *     name becomes the constraint setting name.
+ *
+ * Values are stringified via `toString()`. Qualifier fields are
+ * declared as string-literal unions in DScript, so `toString()` always
+ * produces a usable string.
  */
 function deriveConstraintsFromQualifier(q: Qualifier): ConstraintEntry[] {
-    const anyQ = <{os?: string; cpu?: string; configuration?: string;}>q;
+    const obj = <Object><any>q;
+    const ks = obj.keys();
     let cs: ConstraintEntry[] = [];
-    if (anyQ.os            !== undefined) cs = cs.push({setting: ConstraintSettings.os,   value: anyQ.os});
-    if (anyQ.cpu           !== undefined) cs = cs.push({setting: ConstraintSettings.cpu,  value: anyQ.cpu});
-    if (anyQ.configuration !== undefined) cs = cs.push({setting: ConstraintSettings.mode, value: anyQ.configuration});
+    for (let k of ks) {
+        const v = obj.get(k);
+        if (v === undefined) continue;
+        const setting = k === "configuration" ? ConstraintSettings.mode : k;
+        cs = cs.push({setting: setting, value: v.toString()});
+    }
     return cs;
 }
 
