@@ -4,6 +4,8 @@ bxl_rules is a DScript SDK that provides a structured way to define build rules 
 
 If you've used Bazel before, you'll recognize the patterns. If you haven't, this README introduces each concept from scratch.
 
+> **Status — Buck2-shaped redesign.** Most of the SDK has been rewritten this cycle to apply Buck2's lessons-learned. **Configurations and Transitions**, **Artifacts**, **Actions**, **Anatomy of a Rule**, **select()**, and the **Bazel mapping table** all describe shipped behavior. **Toolchains** stay as a field on the rule definition (`ctx.toolchain`) rather than configured deps; the dep-import side of a Transition is also manual — both because `importFrom` and `withQualifier` are syntactic in DScript, with no value-level analog. See [MIGRATION.md](MIGRATION.md) for the consumer-facing changes.
+
 ## Setup
 
 Add bxl_rules to your `config.dsc`:
@@ -106,10 +108,10 @@ interface MyAttrs {
     optimize?: boolean;       // plain values — passed through as-is
 }
 
-// 2. What impl receives (labels resolved to files)
+// 2. What impl receives (labels resolved to source artifacts)
 interface MyResolved {
     name: string;
-    srcs: File[];
+    srcs: Rules.SourceArtifact[];
     optimize: boolean;
 }
 
@@ -121,31 +123,33 @@ export const my_compiler = Rules.rule<MyAttrs, MyResolved, MyToolchain, MyResult
     // Resolve: declare which fields are labels
     resolve: (attrs, resolver) => ({
         name: attrs.name,
-        srcs: resolver.resolveAll(attrs.srcs),  // Label[] → File[]
+        srcs: resolver.resolveAll(attrs.srcs),  // Label[] → SourceArtifact[]
         optimize: attrs.optimize || false
     }),
 
-    // Impl: build logic — only sees resolved files
+    // Impl: build logic — only sees resolved artifacts
     impl: (ctx) => {
-        const output = ctx.actions.declareFile(ctx.args.name + ".out");
-        const [outputFile] = ctx.actions.run({
+        const out = ctx.actions.declareOutput(ctx.args.name + ".out");
+        const [boundOut] = ctx.actions.run({
             tool: ctx.toolchain.compiler,
             arguments: [
-                Cmd.option("/out:", Artifact.output(output.path)),
-                ...ctx.args.srcs.map(s => Cmd.argument(Artifact.input(s)))
+                Cmd.option("/out:", Rules.cmdOutput(out)),
+                ...ctx.args.srcs.map(s => Cmd.argument(Rules.cmdInput(s)))
             ],
-            outputs: [output]
+            outputs: [out]
         });
         return {
             kind: "MyResult",
-            file: outputFile,
-            defaultInfo: Rules.defaultInfo({ files: [outputFile] })
+            artifact: boundOut,
+            defaultInfo: Rules.defaultInfo({ files: [Rules.getFile(boundOut)] })
         };
     }
 });
 ```
 
-**The key contract:** the `resolve` function is the only place labels are turned into files. The `LabelResolver` is passed in by the framework — it's not importable or callable from anywhere else. This ensures all file references go through controlled resolution.
+**The key contracts:**
+- The `resolve` function is the only place labels are turned into files. The `LabelResolver` is passed in by the framework — it's not importable or callable from anywhere else. This ensures all file references go through controlled resolution.
+- Rule code never reaches through `art.path` or `Sdk.Transformers.Artifact.input/output` directly; `Rules.cmdInput` and `Rules.cmdOutput` are the sanctioned bridges to the BuildXL command-line layer. The underlying `path` field is `@internal` and only used by the SDK adapters in `providers.dsc` and `genrule.dsc`.
 
 ### Providers
 
@@ -176,29 +180,92 @@ return {
 
 ### Actions
 
-The `ctx.actions` API is how rule implementations declare outputs and run processes:
+The `ctx.actions` API is how rule implementations declare outputs and run processes. It speaks in **Artifacts** end-to-end — see the *Artifacts* section below for the type details.
 
 ```typescript
 // Declare an output (the framework decides where it goes)
-const out = ctx.actions.declareFile("output.dll");
+const out = ctx.actions.declareOutput("output.dll");
 
-// Run a process — returns produced files in the same order as outputs
-const [outputFile] = ctx.actions.run({
+// Run a process — returns the BOUND artifacts in the same order as outputs
+const [outArt] = ctx.actions.run({
     tool: ctx.toolchain.compiler,
     arguments: [
-        Cmd.option("/out:", Artifact.output(out.path)),
-        ...sources.map(s => Cmd.argument(Artifact.input(s)))
+        Cmd.option("/out:", Rules.cmdOutput(out)),
+        ...sources.map(s => Cmd.argument(Rules.cmdInput(s)))
     ],
-    outputs: [out],
+    outputs: [out],                     // unbound Artifact, not a raw path
     description: "compile: MyLib"
 });
+
+// outArt.kind === "bound"; Rules.getFile(outArt) is the produced DerivedFile
+// `out` (the original declared handle) is now stale — use `outArt` from here on.
 ```
 
-You can't pass raw paths as outputs — only `DeclaredOutput` instances from `declareFile`. This ensures the framework controls output placement and prevents collisions between targets.
+You can't pass raw paths as outputs — only unbound `Artifact`s from `ctx.actions.declareOutput(...)`. The Actions adapter tracks every claimed output path in a per-target set; double-binding the same path (whether across `run`/`writeFile`/`copyFile` or within a single `run.outputs` array) throws at analysis time. Passing a `SourceArtifact` or an already-bound Artifact as an output also throws, since `kind` must be `"unbound"`. Command-line construction goes through `Rules.cmdInput` / `Rules.cmdOutput` so rule code never touches the `@internal` `Artifact.path` field.
 
 Other action helpers:
-- `ctx.actions.writeFile(output, lines)` — write a text file
-- `ctx.actions.copyFile(source, dest)` — copy a file
+- `ctx.actions.writeFile(output, lines)` — write a text file (returns bound Artifact)
+- `ctx.actions.copyFile(source, dest)` — copy an Artifact (returns bound Artifact)
+
+### Artifacts
+
+An **Artifact** is the unit rule code passes around when wiring inputs and outputs. It replaces the older `DeclaredOutput` and the bare `File` shape borrowed from BuildXL — both of which let rule code accidentally smuggle raw filesystem paths into the build graph.
+
+There are two branded interfaces:
+
+```typescript
+type ArtifactKind = "unbound" | "bound" | "source";
+
+interface Artifact {                       // referenceable handle; may be unbound
+    shortPath: string;                     // user-visible logical name
+    extension: string;                     // ".dll", "" if none
+    kind: ArtifactKind;                    // "unbound" | "bound" | "source"
+    path: Path;                            // @internal — SDK adapters only; use Rules.cmdInput / cmdOutput
+    boundFile?: DerivedFile;               // populated after Actions.run binds it
+}
+
+interface SourceArtifact extends Artifact { // wraps a workspace File; always bound
+    kind: "source";                        // narrowed discriminator
+    file: File;
+}
+```
+
+`kind` is a string-literal discriminator (not paired booleans) so the day DScript narrows discriminated unions reliably, redefining `type Artifact = UnboundArtifact | BoundArtifact | SourceArtifact` — each variant pinning `kind` to a single literal — is a near-trivial change. Today the checker doesn't narrow on field values, so the unbound/bound preconditions on `getFile`, `bindArtifact`, and the Actions adapter's output slots are enforced by `Contract.requires(...)` rather than statically.
+
+**Why no separate `OutputArtifact` type?** Buck2 needs `OutputArtifact` because Starlark's `Artifact` carries mutable binding state and the type system has to distinguish the "I'm reading this" handle from the "I'm producing this" handle. Our `Artifact` is value-shaped (`bindArtifact` returns a new Artifact rather than mutating in place), so the type carries no state that a separate `OutputArtifact` would discipline. The actually-useful property — *each declared output is produced by exactly one action* — is enforced at runtime by the Actions adapter via a path-keyed `MutableSet` rather than by ceremony in the type.
+
+**The lifecycle:** declare → bind → reference.
+
+```typescript
+const out     = ctx.actions.declareOutput("foo.dll");   // Artifact, kind: "unbound"
+const [bound] = ctx.actions.run({                       // bind via Actions.run
+    outputs: [out],
+    ...
+});
+// bound.kind === "bound", bound.boundFile is the produced DerivedFile
+// `out` is now a stale handle — downstream wiring should reference `bound`.
+```
+
+**Source files** entering through label resolution are wrapped in `SourceArtifact` automatically by the framework (the `LabelResolver` returns `SourceArtifact`, not raw `File`):
+
+```typescript
+resolve: (attrs, resolver) => ({
+    name: attrs.name,
+    srcs: resolver.resolveAll(attrs.srcs),  // SourceArtifact[]
+})
+// ctx.args.srcs[i].file gives you the underlying File when a BuildXL
+// primitive needs it; or use Rules.getFile(art) which works uniformly
+// for source and bound artifacts.
+```
+
+**Cheat sheet:**
+- `Rules.declareArtifact(targetDir, name, opts?)` — low-level factory (rule code uses `ctx.actions.declareOutput` instead).
+- `Rules.sourceArtifact(file)` — wrap a workspace `File`.
+- `Rules.getFile(art)` — extract the underlying `File`/`DerivedFile`. Asserts `kind !== "unbound"`.
+- `Rules.cmdInput(art)` — build a command-line input value. Wraps `Sdk.Transformers.Artifact.input(getFile(art))`.
+- `Rules.cmdOutput(art)` — build a command-line output value for an unbound declared Artifact. Wraps `Sdk.Transformers.Artifact.output(art.path)`; this is the *only* sanctioned reader of `Artifact.path` outside the SDK adapters. Asserts `kind === "unbound"`.
+- `Rules.bindArtifact(unbound, derivedFile)` — internal; the Actions adapter calls this. Most rule code does not.
+- `Rules.artifactsEqual(a, b)` — undefined-safe equality.
 
 ### Toolchains
 
@@ -221,6 +288,8 @@ const defaultToolchain: CSharpToolchain = {
 ```
 
 The toolchain is declared in the rule definition and passed to `impl` via `ctx.toolchain`. Callers never see or configure it.
+
+> **Future direction (currently blocked).** In Buck2, toolchains are top-level targets resolved via `attrs.exec_dep(...)`, which lets call-sites pick a toolchain instance per target and the framework apply the appropriate exec transition. The bxl_rules plan reserves the same shape, but BuildXL's `importFrom` requires a string-literal module name, which precludes value-level toolchain resolution. The current "field on the rule definition" shape stays in place until BuildXL exposes a value-level `importByName`.
 
 ### Depset (Transitive Dependencies)
 
@@ -251,14 +320,123 @@ export function my_test(args: { name: string, srcs: Rules.Label[] }) {
 
 Macros pass labels through to rules — they never resolve labels themselves.
 
-### select()
+### Configurations and Transitions
 
-Configuration-based dispatch, like Bazel's `select()`:
+A **Configuration** describes how a target should be built — its platform (e.g., `linux-x64`), build mode (`debug`/`release`), and any other typed constraints. It's a value-shaped wrapper over BuildXL's qualifier:
 
 ```typescript
+import * as Rules from "Sdk.Rules";
+
+const cfg = Rules.fromQualifier(qualifier);
+// cfg.platform        === "linux-x64"
+// cfg.constraints     === [{setting: "mode", value: "debug"}]
+// cfg.hash            === stable identity string
+```
+
+`Configuration` is the **only** sanctioned way to read what platform/constraints apply — there's no second mechanism that can disagree with it. Two Configurations are equivalent iff `configurationsEqual(a, b)` (which compares hashes).
+
+**Reading constraint values:**
+
+```typescript
+const os = Rules.getConstraint(cfg, Rules.ConstraintSettings.os);
+if (os === "linux") { ... }
+```
+
+Predefined platform labels live under `Rules.Platforms.*` (e.g., `Rules.Platforms.linuxX64`); predefined constraint setting names live under `Rules.ConstraintSettings.*` (`os`, `cpu`, `mode`).
+
+**Transitions** describe how a dependency's Configuration relates to its consumer's. They're values, not magic strings:
+
+```typescript
+const targetCfg = Rules.fromQualifier(qualifier);
+const myExec    = Rules.makeExecTransition({ os: "linux", cpu: "x64" });
+const execCfg   = myExec.apply(targetCfg);
+// execCfg.platform    === "linux-x64"  (where build tools run)
+// execCfg preserves the mode constraint, drops target-specific ones
+```
+
+Predefined transitions:
+- `Rules.IdentityTransition` — no-op; same Configuration as the consumer.
+- `Rules.TargetTransition` — alias of identity. Use for readability when documenting "this dep stays in the target config."
+- `Rules.makeExecTransition({os, cpu})` — factory for an exec transition that switches to the supplied host labels. Workspace owners construct one near the qualifier declaration; see *Configuring the exec transition* below.
+
+Transitions *should* be **idempotent**: applying twice equals applying once. The predefined transitions in this SDK are idempotent by construction; custom Transition values are the author's responsibility (Buck2 actively enforces this with a re-apply check, but DScript has no comparable wrapper hook, so we leave it as a documented convention).
+
+**Bazel-platforms-style multi-axis qualifiers (recommended for new workspaces).** Bazel's platform system lets you `select()` on individual constraints (`@platforms//os:linux`, `@platforms//cpu:arm64`) rather than on combined platform names. You can get the same ergonomics here by declaring your workspace qualifier as independent axes — `os`, `cpu`, and `configuration` — instead of a single `platform: "linux-arm64"` field. `Rules.fromQualifier` understands both shapes; the multi-axis form additionally projects each axis as its own constraint, so `Rules.getConstraint(cfg, Rules.ConstraintSettings.cpu) === "arm64"` Just Works without substring-matching the combined platform string. Any other qualifier field your workspace adds (`tfm`, `runtime`, `libc`, `abi`, ...) is passed through as a constraint with the same setting name, and participates in Configuration identity — two qualifiers that differ on *any* field hash differently.
+
+Drop this into your top-level `config.dsc` (and adjust the union members to the OSes/CPUs your build actually supports):
+
+```typescript
+config({
+    resolvers: [ /* ... */ ],
+    qualifiers: {
+        defaultQualifier: { os: "linux", cpu: "x64", configuration: "debug" },
+        namedQualifiers: {
+            "linux-x64-debug":     { os: "linux",   cpu: "x64",   configuration: "debug"   },
+            "linux-x64-release":   { os: "linux",   cpu: "x64",   configuration: "release" },
+            "linux-arm64-release": { os: "linux",   cpu: "arm64", configuration: "release" },
+            "macos-arm64-debug":   { os: "macos",   cpu: "arm64", configuration: "debug"   },
+            "windows-x64-debug":   { os: "windows", cpu: "x64",   configuration: "debug"   },
+        },
+    },
+});
+```
+
+And in any module spec that needs to read the qualifier:
+
+```typescript
+export declare const qualifier: {
+    os:            "linux" | "macos" | "windows" | "freebsd";
+    cpu:           "x64"   | "x86"   | "arm64"   | "arm";
+    configuration: "debug" | "release";
+};
+
+const cfg = Rules.fromQualifier(qualifier);
+const isArm64 = Rules.getConstraint(cfg, Rules.ConstraintSettings.cpu) === "arm64";
+```
+
+`bxl /q:linux-arm64-release` (named) or `bxl /q:os=linux;cpu=arm64;configuration=release` (explicit) on the command line; `bxl` with no `/q:` uses the `defaultQualifier`.
+
+**One key difference from Bazel.** Bazel's `@platforms` workspace ships the canonical OS/CPU constraint values (`@platforms//os:linux`, etc.), and any platform target your project defines just references those labels. We can't ship the equivalent: BuildXL requires the qualifier *type* to be declared per-workspace as a union of string literals (so the engine can enumerate the build matrix), and there's no DScript syntax for an SDK to inject a type into your namespace. Hence the paste-once snippet above. The OS/CPU label vocabulary inside it is a soft convention — pick whatever values you like, just stay consistent across your modules.
+
+**Configuring the exec transition.** There is no global `ExecTransition` singleton, because the SDK can't know which OS-label vocabulary your workspace uses. BuildXL's `Context.getCurrentHost()` reports only `win`/`macOS`/`unix` for OS (so Linux/FreeBSD/Haiku all collapse to `unix`) and `x64`/`x86` for CPU — useful raw input, but it won't match a qualifier matrix that says `os: "linux" | "freebsd" | ...`. Workspaces construct their own exec transition with the labels their qualifier accepts:
+
+```typescript
+// Workspace using BuildXL's vocabulary directly:
+const ExecTransition = Rules.makeExecTransition({ os: Rules.hostOs(), cpu: Rules.hostCpu() });
+
+// Workspace using Bazel-style labels — remap `hostOs()` once:
+const hostOsForWorkspace =
+    Rules.hostOs() === "unix"    ? "linux"   :  // or branch finer if you care
+    Rules.hostOs() === "macos"   ? "macos"   :
+    /* "windows" */                "windows";
+const ExecTransition = Rules.makeExecTransition({ os: hostOsForWorkspace, cpu: Rules.hostCpu() });
+```
+
+Then use the resulting `ExecTransition` value the same way everywhere — e.g. `ExecTransition.apply(targetCfg)`.
+
+**Scope of a Transition.** BuildXL's `withQualifier` is a *syntactic* construct on namespace imports, not a value-level call. A Transition value therefore produces the new Configuration but cannot itself invoke `withQualifier`. The division of labour:
+
+```typescript
+// SDK side: compute the new Configuration as a value.
+const newCfg = ExecTransition.apply(currentCfg);
+
+// Call site: write the import yourself.
+import * as Tool from "Tool" withQualifier(newCfg.underlyingQualifier);
+```
+
+Transition values earn their keep as **qualifier-computation helpers** — host detection, axis flipping, idempotence checks. Applying the result to a dep import is always a manual step in rule code. (Buck2's `attrs.dep(target, transition)` API would automate this, but it presupposes a value-level analog of BuildXL's syntactic `withQualifier` operator, which DScript does not offer.)
+
+### select()
+
+Configuration-based dispatch, like Bazel's `select()`. Use `Configuration` to look up the constraint you're switching on:
+
+```typescript
+const cfg = Rules.fromQualifier(qualifier);
+const os  = Rules.getConstraint(cfg, Rules.ConstraintSettings.os);
+
 const platformDeps = Rules.select(
     [["windows", winDeps], ["linux", linuxDeps]],
-    (key) => qualifier.targetRuntime.includes(key),
+    (key) => key === os,
     defaultDeps
 );
 ```
@@ -276,12 +454,20 @@ If you know Bazel, here's the quick correspondence:
 | `depset()` | `depset()` |
 | `rule(impl, attrs)` | `rule({ impl, resolve, toolchain })` |
 | `attr.label_list()` | Fields in the `resolve` function |
-| `ctx.actions.declare_file()` | `ctx.actions.declareFile()` |
+| `ctx.actions.declare_file()` | `ctx.actions.declareOutput()` |
 | `ctx.actions.run()` | `ctx.actions.run()` |
-| `ctx.files.srcs` | `ctx.args.srcs` (pre-resolved `File[]`) |
+| `File` (input) | `Artifact` / `SourceArtifact` |
+| `File` (output of action) | `Artifact` (with `boundFile`) |
+| Buck2 `OutputArtifact` (`.as_output()`) | *Dropped*: declared `Artifact` is the binding handle; single-binding enforced at runtime by the Actions adapter |
+| `ctx.actions.args().add(file)` | `Cmd.argument(Rules.cmdInput(art))` |
+| Bazel implicit output declaration via `args().add()` | `Cmd.argument(Rules.cmdOutput(unboundArt))` |
+| `ctx.files.srcs` | `ctx.args.srcs` (pre-resolved `SourceArtifact[]`) |
 | `toolchain_type` | `interface X extends Toolchain` |
 | `"//pkg:target"` labels | `"//pkg:target"` labels (same syntax) |
 | `select()` | `select()` |
+| `Configuration` (Bazel/Buck2 platform info) | `Configuration` |
+| `transition()` | `Transition` (value, not a string) |
+| `cfg = "exec"` (Bazel) / `cfg.exec` (Buck2) | `Rules.makeExecTransition({os, cpu})` (no singleton: workspaces declare their host vocabulary) |
 | `visibility = ["//visibility:public"]` | `@@public export` |
 | Starlark (Python-like) | DScript (TypeScript-like) |
 
@@ -291,10 +477,18 @@ If you know Bazel, here's the quick correspondence:
 bxl_rules/
 ├── README.md
 ├── Rules/
-│   ├── module.config.dsc   — Module declaration ("Sdk.Rules")
-│   ├── providers.dsc       — Provider, DefaultInfo, depset, rule(),
-│   │                         Actions, Label, LabelResolver, select
-│   └── genrule.dsc         — genrule, filegroup, copy_file, copy_files
+│   ├── module.config.dsc       — Module declaration ("Sdk.Rules")
+│   ├── configuration.dsc       — Configuration, fromQualifier, hostExecPlatform,
+│   │                             Platforms.*, ConstraintSettings.*
+│   ├── transition.dsc          — Transition, IdentityTransition,
+│   │                             TargetTransition, makeExecTransition
+│   ├── artifact.dsc            — Artifact, SourceArtifact,
+│   │                             declareArtifact, sourceArtifact,
+│   │                             bindArtifact, getFile, cmdInput, cmdOutput
+│   ├── providers.dsc           — Provider, DefaultInfo, depset, rule(),
+│   │                             Actions, Label, LabelResolver, select
+│   └── genrule.dsc             — genrule, filegroup, copy_file, copy_files
+└── Tests/                      — DScript test specs (run via run-tests.sh)
 ```
 
 ## Related

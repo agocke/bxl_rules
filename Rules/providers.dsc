@@ -9,7 +9,7 @@
  * manual path bookkeeping.
  */
 
-import {Artifact, Cmd, Transformer} from "Sdk.Transformers";
+import {Artifact as Tx, Cmd, Transformer} from "Sdk.Transformers";
 
 // ============================================================================
 //  Provider — base interface for all rule outputs
@@ -148,75 +148,84 @@ export interface Toolchain extends Provider {
 }
 
 // ============================================================================
-//  DeclaredOutput — type-safe output declaration
-// ============================================================================
-
-/**
- * A declared output file, analogous to Bazel's `actions.declare_file()`.
- *
- * Rule implementations MUST obtain outputs through `actions.declareFile()`
- * rather than constructing raw `p` paths. This ensures:
- * - Output paths are scoped to the target (no collisions)
- * - The framework controls output layout (not the rule author)
- * - All outputs are tracked for validation
- */
-@@public
-export interface DeclaredOutput {
-    kind: "DeclaredOutput";
-
-    /** The resolved output path. */
-    path: Path;
-
-    /** The declared file name. */
-    name: string;
-}
-
-// ============================================================================
 //  Actions — type-safe action API (like Bazel's ctx.actions)
 // ============================================================================
 
 /**
- * Action helpers scoped to a rule target. Analogous to Bazel's `ctx.actions`.
+ * Action helpers scoped to a rule target. Analogous to Bazel's
+ * `ctx.actions` (and Buck2's `ctx.actions`).
  *
  * All output creation and process execution goes through this interface,
- * ensuring the framework controls output placement and tracking.
+ * ensuring the framework controls output placement and tracking. The
+ * interface speaks in `Artifact` (see Rules/artifact.dsc), never
+ * `File` / `Path`, so rule authors cannot smuggle raw filesystem paths
+ * into the build graph.
+ *
+ * Single-binding enforcement
+ * --------------------------
+ * The Actions adapter holds a per-target set of already-claimed output
+ * paths. The first action method (`run` / `writeFile` / `copyFile`) that
+ * names a given Artifact as an output claims it; a second claim — by
+ * any method, in the same target — throws `Contract.fail` immediately
+ * with the colliding path in the message. Cross-target double-binding
+ * (two rules writing to the same path) is still BuildXL's job to catch
+ * at pip-graph construction time.
  */
 @@public
 export interface Actions {
     /**
-     * Declare an output file this rule will produce.
-     * Analogous to `actions.declare_file("foo.dll")` in Bazel.
+     * Declare an output this rule will produce.
+     * Analogous to `actions.declare_file("foo.dll")` in Bazel and
+     * `ctx.actions.declare_output` in Buck2.
      *
      * The framework decides where the file goes — the rule author only
-     * specifies the filename (and optional subdirectory for organization).
+     * specifies the filename (and optional `subdir` for organisation).
+     * The returned Artifact has `kind === "unbound"`; pass it to one of
+     * the action methods below to bind it. The returned Artifact is the
+     * only legal input to an `outputs:` slot.
      */
-    declareFile(name: string, subdir?: string): DeclaredOutput;
+    declareOutput(name: string, opts?: DeclareArtifactOpts): Artifact;
 
     /**
      * Execute a process, analogous to `actions.run()` in Bazel.
      *
-     * Outputs MUST be `DeclaredOutput` instances from `declareFile`.
-     * Returns the produced output files in the same order as `outputs`.
+     * Each Artifact in `outputs` must have `kind === "unbound"` (i.e.
+     * a freshly declared output that has not yet been claimed by any
+     * action in this target). Reusing the same output across two action
+     * calls — or naming it twice in the same `outputs:` list — throws.
+     *
+     * Returns the bound Artifacts in the same order as `outputs`. Each
+     * returned Artifact has `kind === "bound"` and a populated
+     * `boundFile`; downstream rules should use these (not the unbound
+     * originals, which stay stale) when wiring dependencies.
      */
-    run(args: RunArgs): DerivedFile[];
+    run(args: RunArgs): Artifact[];
 
     /**
      * Write a text file, analogous to `actions.write()` in Bazel.
      *
-     * The output MUST be a `DeclaredOutput` from `declareFile`.
+     * `output` must be a freshly declared, unclaimed Artifact (same
+     * rules as `run.outputs`). Returns the bound Artifact.
      */
-    writeFile(output: DeclaredOutput, lines: string[]): File;
+    writeFile(output: Artifact, lines: string[]): Artifact;
 
     /**
-     * Copy a file into a declared output location.
+     * Copy an Artifact into a declared output location.
+     *
+     * `source` must be a bound Artifact (source or previously-produced).
+     * `dest` must be a freshly declared, unclaimed Artifact (same rules
+     * as `run.outputs`). Returns the bound destination Artifact.
      */
-    copyFile(source: File, dest: DeclaredOutput): File;
+    copyFile(source: Artifact, dest: Artifact): Artifact;
 }
 
 /**
  * Arguments to `actions.run()`.
  *
- * Note: outputs are `DeclaredOutput[]` — you cannot pass raw paths.
+ * `outputs` are unbound `Artifact`s produced by `declareOutput`. Each
+ * is claimed by the call and converted to a bound Artifact in the
+ * returned array (same order). `dependencies` are `Artifact[]` (source
+ * or bound); their underlying files are extracted via `Rules.getFile`.
  */
 @@public
 export interface RunArgs {
@@ -226,11 +235,11 @@ export interface RunArgs {
     /** Command-line arguments. Use Cmd helpers for output references. */
     arguments: Argument[];
 
-    /** Declared outputs this action will produce. */
-    outputs: DeclaredOutput[];
+    /** Declared outputs this action will produce. Each must be unbound. */
+    outputs: Artifact[];
 
     /** Additional input dependencies (beyond those in arguments). */
-    dependencies?: File[];
+    dependencies?: Artifact[];
 
     /** Environment variables. */
     environmentVariables?: {name: string, value: string}[];
@@ -252,12 +261,18 @@ export interface RunArgs {
  * Analogous to Bazel's `ctx` — provides access to resolved attributes,
  * the toolchain, and action helpers.
  *
- * TResolved is the post-resolution type: label fields have been
- * transformed to File[] before impl is called.
+ * `TResolved` is the post-resolution type: label fields have been
+ * transformed by `defn.resolve` before `impl` is called. Labels become
+ * `SourceArtifact[]` (via `LabelResolver.resolveAll`) — never raw
+ * `File[]` — so rule implementations speak in Artifacts end-to-end.
  */
 @@public
 export interface RuleContext<TResolved, TToolchain extends Toolchain> {
-    /** The resolved rule attributes. Label fields are already File[]. */
+    /**
+     * The resolved rule attributes. Label fields are `SourceArtifact[]`
+     * (or `SourceArtifact` for single-label fields) after `defn.resolve`
+     * has been applied.
+     */
     args: TResolved;
 
     /** The resolved toolchain instance. */
@@ -272,38 +287,21 @@ export interface RuleContext<TResolved, TToolchain extends Toolchain> {
 // ============================================================================
 
 /**
- * Metadata for a rule declaration, analogous to Bazel's `rule()` call.
- *
- * In Bazel:
- *   csharp_binary = rule(impl, attrs={...}, toolchains=[...])
- *
- * In DScript:
- *   export const csharp_binary = rule<Attrs, Resolved, Toolchain, Result>({
- *       doc: "Compile a C# exe",
- *       toolchain: defaultToolchain,
- *       resolve: (attrs, dir) => ({ ...resolved fields... }),
- *       impl: (ctx) => compileImpl(ctx),
- *   });
- *
- * The `resolve` function maps caller-facing attrs (with Label[] fields)
- * to impl-facing resolved attrs (with File[] fields). This is analogous
- * to Bazel's attr.label_list() declarations — it tells the framework
- * which fields are labels and how to resolve them.
- *
- * The returned function accepts TAttrs (labels) from callers, resolves
- * them, then calls impl with TResolved (files).
- */
-/**
  * Label resolver function, passed to the resolve callback by rule().
  * This is the only way to resolve labels — it's not exported publicly.
+ *
+ * Returns `SourceArtifact` (not raw `File`) so rule implementations
+ * speak in Artifacts end-to-end. Use `Rules.getFile(art)` if you need
+ * the underlying `File` (e.g. for a `Transformer.execute` call that
+ * expects `File` rather than Artifact).
  */
 @@public
 export interface LabelResolver {
-    /** Resolve a single label to a File. */
-    resolve(label: Label): File;
+    /** Resolve a single label to a SourceArtifact. */
+    resolve(label: Label): SourceArtifact;
 
-    /** Resolve multiple labels to Files. */
-    resolveAll(labels: Label[]): File[];
+    /** Resolve multiple labels to SourceArtifacts. */
+    resolveAll(labels: Label[]): SourceArtifact[];
 }
 
 @@public
@@ -341,8 +339,8 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
     return (args: TAttrs) => {
         const currentDir = d`${Context.getLastActiveUsePath().parent}`;
         const resolver: LabelResolver = {
-            resolve: (label: Label) => resolveLabel(label, currentDir),
-            resolveAll: (labels: Label[]) => resolveLabels(labels, currentDir)
+            resolve: (label: Label) => sourceArtifact(resolveLabel(label, currentDir)),
+            resolveAll: (labels: Label[]) => resolveLabels(labels, currentDir).map(f => sourceArtifact(f))
         };
         const resolved = defn.resolve(args, resolver);
         const actions = createActions(args.name);
@@ -453,25 +451,46 @@ export function select<T>(conditions: [string, T][], matches: (key: string) => b
  * All outputs are placed under a directory named after the target,
  * preventing collisions between targets. This is the implementation
  * backing `ctx.actions` in rule implementations.
+ *
+ * Output binding model: `declareOutput` returns an *unbound* Artifact;
+ * `run` / `writeFile` / `copyFile` return *bound* Artifacts (carrying
+ * the produced `DerivedFile`). Rule code passes the bound result
+ * downstream when wiring deps.
+ *
+ * Not exported: each invocation owns its own `claimedPaths` set, so the
+ * single-binding invariant lives in the rule-evaluation closure. Exposing
+ * the factory would let callers spin up siblings with the same target
+ * name and quietly bypass the check.
  */
 function createActions(targetName: string): Actions {
     const targetDir = Context.getNewOutputDirectory(targetName);
+    const claimedPaths = MutableSet.empty<string>();
+
+    const claim = (a: Artifact, opName: string): Artifact => {
+        Contract.requires(a !== undefined,
+            `${opName}: output Artifact must not be undefined`);
+        Contract.requires(a.kind === "unbound",
+            `${opName}: output Artifact must be unbound (kind === "unbound"); got "${a.kind}". A SourceArtifact cannot be an output, and a bound Artifact has already been produced by a prior action — declare a fresh output with actions.declareOutput.`);
+        const key = a.path.toDiagnosticString();
+        Contract.requires(!claimedPaths.contains(key),
+            `${opName}: output "${key}" has already been claimed by an earlier action in target "${targetName}". Each declared output may be produced by exactly one action.`);
+        claimedPaths.add(key);
+        return a;
+    };
 
     return {
-        declareFile: (name: string, subdir?: string): DeclaredOutput => {
-            const dir = subdir !== undefined
-                ? d`${targetDir}/${subdir}`
-                : targetDir;
-            return {
-                kind: "DeclaredOutput",
-                path: p`${dir}/${name}`,
-                name: name
-            };
+        declareOutput: (name: string, opts?: DeclareArtifactOpts): Artifact => {
+            return declareArtifact(targetDir, name, opts);
         },
 
-        run: (args: RunArgs): DerivedFile[] => {
-            const outputPaths = args.outputs.map(o => o.path);
+        run: (args: RunArgs): Artifact[] => {
+            const outputArts = args.outputs.map(o => claim(o, "Actions.run"));
+            const outputPaths = outputArts.map(a => a.path);
             const workDir = args.workingDirectory || targetDir;
+
+            const depFiles = args.dependencies !== undefined
+                ? args.dependencies.map(a => getFile(a))
+                : undefined;
 
             const execResult = Transformer.execute({
                 tool: {
@@ -481,22 +500,34 @@ function createActions(targetName: string): Actions {
                 arguments: args.arguments,
                 workingDirectory: workDir,
                 implicitOutputs: outputPaths,
-                dependencies: args.dependencies,
+                dependencies: depFiles,
                 environmentVariables: args.environmentVariables !== undefined
                     ? args.environmentVariables.map(e => ({name: e.name, value: e.value}))
                     : undefined,
                 description: args.description || targetName
             });
 
-            return args.outputs.map(o => execResult.getOutputFile(o.path));
+            return outputArts.map(a => bindArtifact(a, execResult.getOutputFile(a.path)));
         },
 
-        writeFile: (output: DeclaredOutput, lines: string[]): File => {
-            return Transformer.writeAllLines(output.path, lines);
+        writeFile: (output: Artifact, lines: string[]): Artifact => {
+            claim(output, "Actions.writeFile");
+            const f = Transformer.writeAllLines(output.path, lines);
+            // SAFETY: BuildXL's Transformer.writeAllLines is typed `File` but in
+            // practice always produces a DerivedFile (the pip output). DScript
+            // casts are erased, so this cannot be runtime-validated; if BuildXL
+            // ever returns a non-DerivedFile, downstream `getFile` will return
+            // a File where a DerivedFile was expected.
+            return bindArtifact(output, <DerivedFile>f);
         },
 
-        copyFile: (source: File, dest: DeclaredOutput): File => {
-            return Transformer.copyFile(source, dest.path);
+        copyFile: (source: Artifact, dest: Artifact): Artifact => {
+            claim(dest, "Actions.copyFile");
+            const sourceFile = getFile(source);
+            const f = Transformer.copyFile(sourceFile, dest.path);
+            // SAFETY: same as writeFile above — Transformer.copyFile is typed
+            // `File` but always produces a DerivedFile in practice.
+            return bindArtifact(dest, <DerivedFile>f);
         }
     };
 }

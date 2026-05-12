@@ -2,24 +2,43 @@
 // Licensed under the MIT License.
 
 /**
- * Sdk.Rules — A language-agnostic Bazel-style rules engine for BuildXL.
+ * Sdk.Rules — A language-agnostic Bazel/Buck2-style rules engine for BuildXL.
  *
- * Core primitives (providers.dsc):
- *   - depset<T>()    — tree-structured, deduplicated transitive collection
- *   - provider<T>()  — typed key for extensible rule outputs
- *   - DefaultInfo    — universal output descriptor (files + data + providers)
- *   - ProviderMap    — bag of typed providers attached to a rule result
- *   - RuleResult     — standard return type wrapping DefaultInfo + providers
+ * Configuration & transitions (configuration.dsc, transition.dsc):
+ *   - Configuration       — the value-shaped, branded build configuration
+ *                           (a view over a BuildXL qualifier)
+ *   - fromQualifier       — the only sanctioned Configuration factory
+ *   - Transition          — pure Configuration→Configuration function (branded)
+ *   - IdentityTransition / TargetTransition — predefined transitions
+ *   - makeExecTransition({os, cpu}) — factory for an exec transition
+ *     with workspace-specific host labels
+ *
+ * Artifact model (artifact.dsc):
+ *   - Artifact            — referenceable handle (may be unbound)
+ *   - SourceArtifact      — wraps a workspace File; always bound
+ *   - declareArtifact / sourceArtifact — factories
+ *   - bindArtifact / getFile — binding helpers used by the Actions adapter
+ *   - cmdInput / cmdOutput — sanctioned wrappers for tool command lines
+ *                           (route around the `@internal` Artifact.path)
+ *
+ * Core rules-engine primitives (providers.dsc):
+ *   - Provider             — base discriminator interface for rule outputs
+ *   - depset<T>()         — tree-structured, deduplicated transitive collection
+ *   - DefaultInfo         — universal output descriptor
+ *   - Actions             — the action API (declareOutput / run / writeFile / copyFile);
+ *                           enforces within-target single-binding via a path-keyed set
+ *   - rule()              — the declarative rule factory
+ *   - LabelResolver       — returns SourceArtifact (not raw File)
  *
  * General-purpose rules (genrule.dsc):
- *   - genrule        — run any tool, declare inputs/outputs by name
- *   - filegroup      — group files under a logical name
- *   - copy_file      — copy a single file
- *   - copy_files     — copy a set of files
+ *   - genrule             — run any tool, declare outputs by name
+ *   - filegroup           — group SourceArtifacts under a logical name
+ *   - copy_file           — copy a single Artifact
+ *   - copy_files          — copy a set of Artifacts
  *
  * Language-specific rules live in separate modules:
- *   - Sdk.Rules.CSharp  — csharp_library, csharp_binary, csharp_test
+ *   - Sdk.Rules.CSharp    — csharp_library, csharp_binary, csharp_test
  */
 
-// All exports are defined in providers.dsc and genrule.dsc.
+// All exports are defined in their respective .dsc files.
 // This file serves as the module documentation entry point.
