@@ -4,13 +4,12 @@
 /**
  * Sdk.Rules — A language-agnostic Bazel/Buck2-style rules engine for BuildXL.
  *
- * Configuration & transitions (configuration.dsc, transition.dsc, configured_label.dsc):
+ * Configuration & transitions (configuration.dsc, transition.dsc):
  *   - Configuration       — the value-shaped, branded build configuration
  *                           (a view over a BuildXL qualifier)
  *   - fromQualifier       — the only sanctioned Configuration factory
  *   - Transition          — pure Configuration→Configuration function (branded)
  *   - IdentityTransition / TargetTransition / ExecTransition — predefined
- *   - ConfiguredLabel     — target reference paired with a Configuration
  *
  * Artifact model (artifact.dsc):
  *   - Artifact            — referenceable handle (may be unbound)

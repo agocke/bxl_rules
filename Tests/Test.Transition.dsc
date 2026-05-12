@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * Tests for Rules/transition.dsc and Rules/configured_label.dsc.
+ * Tests for Rules/transition.dsc.
  *
  * Same harness as Test.Config.dsc: each test returns "ok" on success;
  * a `Contract.assert` failure aborts evaluation and bxl reports a
@@ -223,70 +223,6 @@ function test_fromQualifier_legacyPlatformFieldStillWorks(): string {
     return "ok";
 }
 
-// ----------------------------------------------------------------------------
-// ConfiguredLabel
-// ----------------------------------------------------------------------------
-
-function test_withConfiguration_carriesBothFields(): string {
-    const cfg = Rules.fromQualifier({ platform: "linux-x64" });
-    const cl  = Rules.withConfiguration("//foo:bar", cfg);
-
-    Contract.assert(cl.label === "//foo:bar",
-        "ConfiguredLabel.label must equal the input label string");
-    Contract.assert(Rules.configurationsEqual(cl.configuration, cfg),
-        "ConfiguredLabel.configuration must equal the input Configuration");
-
-    return "ok";
-}
-
-function test_configuredLabelsEqual_reflexive(): string {
-    const cfg = Rules.fromQualifier({ platform: "linux-x64" });
-    const cl  = Rules.withConfiguration("//foo:bar", cfg);
-
-    Contract.assert(Rules.configuredLabelsEqual(cl, cl),
-        "configuredLabelsEqual must be reflexive");
-
-    return "ok";
-}
-
-function test_configuredLabelsEqual_distinguishesLabels(): string {
-    const cfg = Rules.fromQualifier({ platform: "linux-x64" });
-    const a   = Rules.withConfiguration("//foo:bar",  cfg);
-    const b   = Rules.withConfiguration("//foo:quux", cfg);
-
-    Contract.assert(!Rules.configuredLabelsEqual(a, b),
-        "ConfiguredLabels with different label strings must not be equal");
-
-    return "ok";
-}
-
-function test_configuredLabelsEqual_distinguishesConfigurations(): string {
-    const targetCfg = Rules.fromQualifier({ platform: "linux-arm64" });
-    const execCfg   = Rules.ExecTransition.apply(targetCfg);
-
-    const target = Rules.withConfiguration("//foo:bar", targetCfg);
-    const exec   = Rules.withConfiguration("//foo:bar", execCfg);
-
-    Contract.assert(!Rules.configuredLabelsEqual(target, exec),
-        "same label under different configurations must not be equal");
-
-    return "ok";
-}
-
-function test_configuredLabelsEqual_undefinedSafety(): string {
-    const cfg = Rules.fromQualifier({});
-    const cl  = Rules.withConfiguration("//x:y", cfg);
-
-    Contract.assert(!Rules.configuredLabelsEqual(cl, undefined),
-        "configuredLabelsEqual(cl, undefined) === false");
-    Contract.assert(!Rules.configuredLabelsEqual(undefined, cl),
-        "configuredLabelsEqual(undefined, cl) === false");
-    Contract.assert(!Rules.configuredLabelsEqual(undefined, undefined),
-        "configuredLabelsEqual(undefined, undefined) === false");
-
-    return "ok";
-}
-
 // ============================================================================
 // Test exports
 // ============================================================================
@@ -300,14 +236,9 @@ function test_configuredLabelsEqual_undefinedSafety(): string {
 @@public export const tt07 = test_execTransition_dropsTargetSpecificConstraints();
 @@public export const tt08 = test_execTransition_doesNotMutateInput();
 @@public export const tt09 = test_execTransition_carriesUsableQualifier();
-@@public export const tt10 = test_withConfiguration_carriesBothFields();
-@@public export const tt11 = test_configuredLabelsEqual_reflexive();
-@@public export const tt12 = test_configuredLabelsEqual_distinguishesLabels();
-@@public export const tt13 = test_configuredLabelsEqual_distinguishesConfigurations();
-@@public export const tt14 = test_configuredLabelsEqual_undefinedSafety();
-@@public export const tt15 = test_makeExecTransition_usesSuppliedLabels();
-@@public export const tt16 = test_makeExecTransition_preservesMode();
-@@public export const tt17 = test_makeExecTransition_isIdempotent();
-@@public export const tt18 = test_fromQualifier_readsOsAndCpuIndependently();
-@@public export const tt19 = test_fromQualifier_osPlusCpuSynthesisesPlatform();
-@@public export const tt20 = test_fromQualifier_legacyPlatformFieldStillWorks();
+@@public export const tt10 = test_makeExecTransition_usesSuppliedLabels();
+@@public export const tt11 = test_makeExecTransition_preservesMode();
+@@public export const tt12 = test_makeExecTransition_isIdempotent();
+@@public export const tt13 = test_fromQualifier_readsOsAndCpuIndependently();
+@@public export const tt14 = test_fromQualifier_osPlusCpuSynthesisesPlatform();
+@@public export const tt15 = test_fromQualifier_legacyPlatformFieldStillWorks();

@@ -49,12 +49,12 @@ Why: `Configuration` is the single source of truth for build settings. The quali
 const codegenDep = { label: "//tools:codegen", cfg: "exec" };
 ```
 
-**After** — apply a Transition value:
+**After** — apply a Transition value to compute the new Configuration; then use its `underlyingQualifier` at the dep-import site:
 
 ```typescript
-const targetCfg  = Rules.fromQualifier(qualifier);
-const execCfg    = Rules.ExecTransition.apply(targetCfg);
-const codegenDep = Rules.withConfiguration("//tools:codegen", execCfg);
+const targetCfg = Rules.fromQualifier(qualifier);
+const execCfg   = Rules.ExecTransition.apply(targetCfg);
+import * as Codegen from "Codegen" withQualifier(execCfg.underlyingQualifier);
 ```
 
 `Rules.IdentityTransition` / `Rules.TargetTransition` / `Rules.ExecTransition` are the predefined transitions. Custom ones can be defined as `<Transition>{ name, apply: cfg => ... }` and must be idempotent.

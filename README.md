@@ -363,16 +363,6 @@ Predefined transitions:
 
 Transitions are **idempotent**: applying twice equals applying once. This matches Buck2's enforced contract.
 
-**ConfiguredLabel** pairs a target string with the Configuration it should be evaluated under:
-
-```typescript
-const dep = Rules.withConfiguration("//tools:codegen", execCfg);
-// dep.label         === "//tools:codegen"
-// dep.configuration === execCfg
-```
-
-Two configured labels with the same string but different Configurations are distinct nodes in the dependency graph.
-
 **Bazel-platforms-style multi-axis qualifiers (recommended for new workspaces).** Bazel's platform system lets you `select()` on individual constraints (`@platforms//os:linux`, `@platforms//cpu:arm64`) rather than on combined platform names. You can get the same ergonomics here by declaring your workspace qualifier as independent axes — `os`, `cpu`, and `configuration` — instead of a single `platform: "linux-arm64"` field. `Rules.fromQualifier` understands both shapes; the multi-axis form additionally projects each axis as its own constraint, so `Rules.getConstraint(cfg, Rules.ConstraintSettings.cpu) === "arm64"` Just Works without substring-matching the combined platform string.
 
 Drop this into your top-level `config.dsc` (and adjust the union members to the OSes/CPUs your build actually supports):
@@ -471,7 +461,6 @@ If you know Bazel, here's the quick correspondence:
 | `Configuration` (Bazel/Buck2 platform info) | `Configuration` |
 | `transition()` | `Transition` (value, not a string) |
 | `cfg = "exec"` (Bazel) / `cfg.exec` (Buck2) | `Rules.ExecTransition` |
-| Configured target label | `ConfiguredLabel` |
 | `visibility = ["//visibility:public"]` | `@@public export` |
 | Starlark (Python-like) | DScript (TypeScript-like) |
 
@@ -485,9 +474,8 @@ bxl_rules/
 │   ├── configuration.dsc       — Configuration, fromQualifier, hostExecPlatform,
 │   │                             Platforms.*, ConstraintSettings.*
 │   ├── transition.dsc          — Transition, IdentityTransition,
-│   │                             TargetTransition, ExecTransition
-│   ├── configured_label.dsc    — ConfiguredLabel, withConfiguration,
-│   │                             configuredLabelsEqual
+│   │                             TargetTransition, ExecTransition,
+│   │                             makeExecTransition
 │   ├── artifact.dsc            — Artifact, SourceArtifact, OutputArtifact,
 │   │                             declareArtifact, sourceArtifact, asOutput,
 │   │                             bindArtifact, getFile, cmdInput, cmdOutput
