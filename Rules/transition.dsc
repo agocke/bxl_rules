@@ -27,10 +27,11 @@
  *     const newCfg = MyTransition.apply(currentCfg);
  *     import * as Dep from "Dep" withQualifier(newCfg.underlyingQualifier);
  *
- *   When Phase 3 adds the rule-machinery wiring (`incomingTransition`,
- *   `attrs.dep(target, transition)`), the SDK will be the only thing
- *   that emits these imports — closing the drift hazard discussed in
- *   the design notes.
+ *   Hiding this behind `attrs.dep(target, transition)` would require a
+ *   BuildXL language change (a value-level analog of the syntactic
+ *   `withQualifier` operator). Until that lands, the SDK cannot be the
+ *   sole emitter of these imports — rule code must write them at the
+ *   call site.
  */
 
 // ============================================================================

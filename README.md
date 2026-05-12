@@ -424,7 +424,7 @@ const newCfg = Rules.ExecTransition.apply(currentCfg);
 import * as Tool from "Tool" withQualifier(newCfg.underlyingQualifier);
 ```
 
-A later phase will hide this behind `attrs.dep(target, transition)` so users never write the import directly.
+Hiding this behind `attrs.dep(target, transition)` would require a BuildXL language change — a value-level analog of the syntactic `withQualifier` operator. Until that lands, rule code must emit the `withQualifier` import at the call site.
 
 ### select()
 

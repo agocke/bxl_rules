@@ -65,7 +65,7 @@ const codegenDep = Rules.withConfiguration("//tools:codegen", execCfg);
 import * as Tool from "Tool" withQualifier(execCfg.underlyingQualifier);
 ```
 
-This will eventually be hidden behind `attrs.dep(target, transition)` once the language gap is closed (Phase 3 is blocked on a BuildXL change).
+This will eventually be hidden behind `attrs.dep(target, transition)`, but that requires a BuildXL language change (no value-level analog of the syntactic `withQualifier` operator exists today). Until that gap is closed, rule code must emit the `withQualifier` import explicitly at the call site.
 
 ## 3. Label resolution
 
