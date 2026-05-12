@@ -4,7 +4,7 @@ bxl_rules is a DScript SDK that provides a structured way to define build rules 
 
 If you've used Bazel before, you'll recognize the patterns. If you haven't, this README introduces each concept from scratch.
 
-> **Status — Buck2-shaped redesign.** Most of the SDK has been rewritten this cycle to apply Buck2's lessons-learned. **Configurations and Transitions**, **Artifacts**, **Actions**, **Anatomy of a Rule**, **select()**, and the **Bazel mapping table** all describe shipped behavior. The **Toolchains** section still describes the older "field on the rule definition" shape — toolchain-as-configured-dep is blocked on a BuildXL language gap (`importFrom` requires a string-literal module name; runtime resolution would need a value-level `importByName`). See [MIGRATION.md](MIGRATION.md) for the consumer-facing changes.
+> **Status — Buck2-shaped redesign.** Most of the SDK has been rewritten this cycle to apply Buck2's lessons-learned. **Configurations and Transitions**, **Artifacts**, **Actions**, **Anatomy of a Rule**, **select()**, and the **Bazel mapping table** all describe shipped behavior. **Toolchains** stay as a field on the rule definition (`ctx.toolchain`) rather than configured deps; the dep-import side of a Transition is also manual — both because `importFrom` and `withQualifier` are syntactic in DScript, with no value-level analog. See [MIGRATION.md](MIGRATION.md) for the consumer-facing changes.
 
 ## Setup
 
@@ -417,14 +417,17 @@ const myExec = Rules.makeExecTransition({ os: "linux", cpu: "x64" });
 const execCfg = myExec.apply(targetCfg);
 ```
 
-**Caveat — language gap.** BuildXL's `withQualifier` is a syntactic construct on namespace imports, not a value-level call. So a Transition produces the new Configuration but cannot itself invoke `withQualifier`. The call-site contract today is:
+**Scope of a Transition.** BuildXL's `withQualifier` is a *syntactic* construct on namespace imports, not a value-level call. A Transition value therefore produces the new Configuration but cannot itself invoke `withQualifier`. The division of labour:
 
 ```typescript
+// SDK side: compute the new Configuration as a value.
 const newCfg = Rules.ExecTransition.apply(currentCfg);
+
+// Call site: write the import yourself.
 import * as Tool from "Tool" withQualifier(newCfg.underlyingQualifier);
 ```
 
-Hiding this behind `attrs.dep(target, transition)` would require a BuildXL language change — a value-level analog of the syntactic `withQualifier` operator. Until that lands, rule code must emit the `withQualifier` import at the call site.
+Transition values earn their keep as **qualifier-computation helpers** — host detection, axis flipping, idempotence checks. Applying the result to a dep import is always a manual step in rule code. (Buck2's `attrs.dep(target, transition)` API would automate this, but it presupposes a value-level analog of BuildXL's syntactic `withQualifier` operator, which DScript does not offer.)
 
 ### select()
 

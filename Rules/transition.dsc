@@ -17,21 +17,23 @@
  *     produces a Configuration any other way — `fromQualifier` is the
  *     single sanctioned entry point.
  *
- * Caveat — DScript language gap:
+ * Scope — what Transitions do and don't do:
  *   BuildXL's `withQualifier` is a *syntactic* construct on namespace
  *   imports (`import * as M from "X" withQualifier({...})`), not a
  *   value-level call. A `Transition` therefore produces the new
- *   Configuration but cannot itself invoke `withQualifier`. The call
- *   site is responsible for:
+ *   Configuration but cannot itself invoke `withQualifier`. The
+ *   division of labour is:
  *
+ *     // SDK side: compute the new Configuration as a value.
  *     const newCfg = MyTransition.apply(currentCfg);
+ *
+ *     // Call site: write the import yourself.
  *     import * as Dep from "Dep" withQualifier(newCfg.underlyingQualifier);
  *
- *   Hiding this behind `attrs.dep(target, transition)` would require a
- *   BuildXL language change (a value-level analog of the syntactic
- *   `withQualifier` operator). Until that lands, the SDK cannot be the
- *   sole emitter of these imports — rule code must write them at the
- *   call site.
+ *   Transition values exist to encapsulate the *math* of "given this
+ *   target configuration, what's the new qualifier" — host detection,
+ *   axis flipping, idempotence. Applying the result to a dep import is
+ *   always a manual step in rule code.
  */
 
 // ============================================================================
@@ -118,8 +120,8 @@ export const TargetTransition: Transition = IdentityTransition;
  *
  * @param host  The host platform's `os` and `cpu` labels. These must
  *              match values that the workspace's qualifier type accepts
- *              (otherwise the eventual `withQualifier(...)` import will
- *              be rejected by BuildXL's qualifier checker).
+ *              (otherwise the `withQualifier(...)` import at the call
+ *              site will be rejected by BuildXL's qualifier checker).
  */
 @@public
 export function makeExecTransition(host: { os: string; cpu: string; }): Transition {

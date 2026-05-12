@@ -59,13 +59,13 @@ const codegenDep = Rules.withConfiguration("//tools:codegen", execCfg);
 
 `Rules.IdentityTransition` / `Rules.TargetTransition` / `Rules.ExecTransition` are the predefined transitions. Custom ones can be defined as `<Transition>{ name, apply: cfg => ... }` and must be idempotent.
 
-**Caveat (unchanged):** BuildXL's `withQualifier` is syntactic, so the rule code still has to do:
+**Scope:** BuildXL's `withQualifier` is syntactic, so the dep-import side stays manual:
 
 ```typescript
 import * as Tool from "Tool" withQualifier(execCfg.underlyingQualifier);
 ```
 
-This will eventually be hidden behind `attrs.dep(target, transition)`, but that requires a BuildXL language change (no value-level analog of the syntactic `withQualifier` operator exists today). Until that gap is closed, rule code must emit the `withQualifier` import explicitly at the call site.
+A Transition computes the new Configuration as a value; the rule writes the `withQualifier` import at the call site. Buck2's `attrs.dep(target, transition)` would automate this, but it presupposes a value-level analog of BuildXL's syntactic `withQualifier` operator. Treat the manual import as the supported shape.
 
 ## 3. Label resolution
 
@@ -191,7 +191,7 @@ There's no enforced change — providers can carry whatever fields they like. Tw
 ## What did **not** change
 
 - BUILD.dsc call sites (the user-facing Part 1 of the README): `csharp_library({ name, srcs, refs })` etc. all still take label-string arrays. The artifact split is invisible above the rule boundary.
-- `Toolchain` — still a field on the rule definition, accessed as `ctx.toolchain`. Wiring toolchains in as configured deps (Buck2-style) would require value-level transitions at the import boundary, which is the same BuildXL language gap that blocks `attrs.dep(target, transition)`.
+- `Toolchain` — a field on the rule definition, accessed as `ctx.toolchain`. Per-target toolchain transitions (Buck2's "toolchains as configured deps") would require a value-level analog of BuildXL's syntactic `withQualifier` operator, which DScript does not offer; toolchains stay scoped to the rule definition.
 - `select()`, `depset()`, `Provider`, `DefaultInfo`, `rule()` factory shape — same signatures.
 - `Rules.Label` type and label string syntax — same.
 - `Cmd.*`, `Tool.*` — unchanged BuildXL surface.
