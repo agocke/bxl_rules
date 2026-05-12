@@ -150,10 +150,15 @@ export namespace Platforms {
  *
  * Derivations (the qualifier IS the source of truth — there are no overrides):
  *   - `platform` ← independent `os`+`cpu` axes (joined as `<os>-<cpu>`),
- *     then `qualifier.platform`, then `qualifier.targetRuntime`, else the
- *     host's exec platform. This is a diagnostic/output-directory label
- *     only; it does not influence Configuration identity beyond what the
- *     underlying axes already contribute.
+ *     then `qualifier.platform`, then `qualifier.targetRuntime`, else
+ *     the host's exec platform. This combined label is intended for
+ *     diagnostics and output-directory naming; it also feeds the
+ *     identity hash, but for the multi-axis (`os`+`cpu`) case that's
+ *     redundant with the axes already in `constraints` and for the
+ *     legacy bundle case (`platform: "linux-x64"`) it overlaps with
+ *     the same field passed through into `constraints`. Either way
+ *     the hash still distinguishes any two non-equivalent qualifiers
+ *     — the redundancy is benign.
  *   - `constraints` ← *every* field on the qualifier becomes a
  *     `ConstraintEntry`. The setting names `os`, `cpu`, and `mode`
  *     (the latter renamed from `configuration`) are well-known and

@@ -22,8 +22,8 @@
  *                           (route around the `@internal` Artifact.path)
  *
  * Core rules-engine primitives (providers.dsc):
+ *   - Provider             — base discriminator interface for rule outputs
  *   - depset<T>()         — tree-structured, deduplicated transitive collection
- *   - provider<T>()       — typed key for extensible rule outputs
  *   - DefaultInfo         — universal output descriptor
  *   - Actions             — the action API (declareOutput / run / writeFile / copyFile);
  *                           enforces within-target single-binding via a path-keyed set
