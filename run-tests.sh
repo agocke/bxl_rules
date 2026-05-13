@@ -7,7 +7,8 @@
 # (or there was a type error).
 #
 # Requires:
-#   - `bxl` on PATH (install via `dotnet tool install -g Microsoft.BuildXL.Tool`)
+#   - `bxl` on PATH (install via
+#     `dotnet tool install -g agtest.bxl.tool --version 0.2.0-ci.3.a5a8b51`)
 
 set -euo pipefail
 
@@ -21,18 +22,32 @@ case "$(uname -s)" in
     *) echo "ERROR: unsupported host OS: $(uname -s)" >&2; exit 1 ;;
 esac
 
+INSTALL_CMD="dotnet tool install -g agtest.bxl.tool --version 0.2.0-ci.3.a5a8b51"
+BXL_SHIM="$(command -v bxl || true)"
+
+if [[ -z "$BXL_SHIM" ]]; then
+    echo "ERROR: could not find 'bxl' on PATH." >&2
+    echo "Install bxl: $INSTALL_CMD" >&2
+    exit 1
+fi
+
 # Locate the dotnet-tool deployment directory of bxl. The shim under
 # ~/.dotnet/tools/ is a single-file apphost; the actual SDK files live under
-# the .store. We resolve via the dotnet-tools shim store path.
-BXL_BIN_HINT="$(dirname "$(realpath "$(command -v bxl)")")"
-if [[ ! -d "$BXL_BIN_HINT/Sdk/Sdk.Transformers" ]]; then
-    # Fallback: search the dotnet-tool store for the host-platform deployment.
-    BXL_BIN_HINT="$(find "$HOME/.dotnet/tools/.store" -type d -name "$ARCH_DIR" -path '*microsoft.buildxl.tool*' 2>/dev/null | head -1)"
+# the .store. Resolve the real payload directory in a package-agnostic way so
+# the script works with the bootstrap compiler tool package.
+BXL_BIN_HINT="$(dirname "$(realpath "$BXL_SHIM")")"
+if [[ ! -d "$BXL_BIN_HINT/Sdk/Sdk.Transformers" && -d "$HOME/.dotnet/tools/.store" ]]; then
+    while IFS= read -r candidate; do
+        if [[ -d "$candidate/Sdk/Sdk.Transformers" ]]; then
+            BXL_BIN_HINT="$candidate"
+            break
+        fi
+    done < <(find "$HOME/.dotnet/tools/.store" -type d -path "*/tools/net*/$ARCH_DIR" 2>/dev/null)
 fi
 
 if [[ ! -d "$BXL_BIN_HINT/Sdk/Sdk.Transformers" ]]; then
     echo "ERROR: could not locate the bxl SDK directory (looked under $BXL_BIN_HINT)." >&2
-    echo "Install bxl: dotnet tool install -g Microsoft.BuildXL.Tool" >&2
+    echo "Install bxl: $INSTALL_CMD" >&2
     exit 1
 fi
 

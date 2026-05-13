@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install BuildXL bootstrap compiler
+        run: dotnet tool install --global agtest.bxl.tool --version 0.2.0-ci.3.a5a8b51
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      - name: Run DScript tests
+        run: ./run-tests.sh
