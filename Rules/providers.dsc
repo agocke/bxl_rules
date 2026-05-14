@@ -321,6 +321,15 @@ export interface RuleDefinition<TAttrs, TResolved, TToolchain extends Toolchain,
 
     /** The toolchain instance to use. */
     toolchain: TToolchain;
+
+    /**
+     * External packages available for `@pkg//path:file` label resolution.
+     *
+     * Keys are package names (e.g. "DotNetSdk", "xunit.core"); values
+     * are StaticDirectory contents from Download or NuGet resolvers.
+     * Labels starting with `@` are resolved against this map.
+     */
+    externalPackages?: Map<string, StaticDirectory>;
 }
 
 /**
@@ -331,6 +340,10 @@ export interface RuleDefinition<TAttrs, TResolved, TToolchain extends Toolchain,
  * directory, passes it to `resolve`, then calls `impl` with the
  * resolved attrs. Neither resolve nor impl can access the raw
  * resolveLabel function — it's fully encapsulated.
+ *
+ * If `externalPackages` is provided in the definition, labels of
+ * the form `@pkg//path:file` are resolved against the corresponding
+ * StaticDirectory via `assertExistence`.
  */
 @@public
 export function rule<TAttrs extends { name: string }, TResolved, TToolchain extends Toolchain, TResult extends Provider>(
@@ -338,9 +351,10 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
 ): (args: TAttrs) => TResult {
     return (args: TAttrs) => {
         const currentDir = d`${Context.getLastActiveUsePath().parent}`;
+        const extPkgs = defn.externalPackages || Map.empty<string, StaticDirectory>();
         const resolver: LabelResolver = {
-            resolve: (label: Label) => sourceArtifact(resolveLabel(label, currentDir)),
-            resolveAll: (labels: Label[]) => resolveLabels(labels, currentDir).map(f => sourceArtifact(f))
+            resolve: (label: Label) => sourceArtifact(resolveLabel(label, currentDir, extPkgs)),
+            resolveAll: (labels: Label[]) => resolveLabels(labels, currentDir, extPkgs).map(f => sourceArtifact(f))
         };
         const resolved = defn.resolve(args, resolver);
         const actions = createActions(args.name);
@@ -359,10 +373,14 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
  *   "BasicTest.cs"                     — local file in current package
  *   ":BasicTest.cs"                    — explicit local file reference
  *   "//path/to/pkg:filename"           — workspace-relative file reference
+ *   "@pkg//path:filename"              — external package file reference
  *
  * Resolution is purely mechanical — labels encode paths directly:
  *   "//artifacts/bin/System.Runtime/ref/Release/net11.0:System.Runtime.dll"
  *   → {workspace_root}/artifacts/bin/System.Runtime/ref/Release/net11.0/System.Runtime.dll
+ *
+ *   "@DotNetSdk//sdk/11.0.100:Microsoft.CodeAnalysis.dll"
+ *   → externalPackages["DotNetSdk"].assertExistence(r`sdk/11.0.100/Microsoft.CodeAnalysis.dll`)
  *
  * Labels are strings, so File literals CANNOT be passed where Labels are
  * expected. This enforces that all file references go through the label
@@ -372,14 +390,39 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
 export type Label = string;
 
 // ============================================================================
-//  Label resolution — purely mechanical, no registry needed
+//  Label resolution
 // ============================================================================
 
 /**
  * Resolve a label to a File. Internal — only accessible via LabelResolver.
+ *
+ * Supports four label forms:
+ *   "@pkg//dir:file"       — external package (StaticDirectory.assertExistence)
+ *   "//pkg:file"           — workspace-relative
+ *   ":file"                — current-directory-relative
+ *   "file"                 — bare name (current directory)
  */
-function resolveLabel(label: Label, currentDir: Directory): File {
+function resolveLabel(label: Label, currentDir: Directory, externalPkgs: Map<string, StaticDirectory>): File {
     const workspaceRoot = d`${Context.getMount("SourceRoot").path}`;
+
+    // @pkg//path:file — external package reference
+    if (label.startsWith("@")) {
+        const slashIdx = label.indexOf("//");
+        Contract.requires(slashIdx > 1,
+            `Invalid external label '${label}': expected '@pkg//path:file' format`);
+        const pkgName = label.slice(1, slashIdx);
+        const rest = label.slice(slashIdx + 2);
+        const colonIdx = rest.indexOf(":");
+        const dir = colonIdx >= 0 ? rest.slice(0, colonIdx) : "";
+        const file = colonIdx >= 0 ? rest.slice(colonIdx + 1) : rest;
+        Contract.requires(externalPkgs.containsKey(pkgName),
+            `External package '${pkgName}' not registered in externalPackages`);
+        const pkg = externalPkgs.get(pkgName);
+        if (dir !== "") {
+            return pkg.assertExistence(r`${dir}/${file}`);
+        }
+        return pkg.assertExistence(r`${file}`);
+    }
 
     // //path/to/pkg:filename — workspace-relative
     if (label.startsWith("//")) {
@@ -407,8 +450,8 @@ function resolveLabel(label: Label, currentDir: Directory): File {
 /**
  * Resolve multiple labels to Files. Internal — only accessible via LabelResolver.
  */
-function resolveLabels(labels: Label[], currentDir: Directory): File[] {
-    return labels.map(l => resolveLabel(l, currentDir));
+function resolveLabels(labels: Label[], currentDir: Directory, externalPkgs: Map<string, StaticDirectory>): File[] {
+    return labels.map(l => resolveLabel(l, currentDir, externalPkgs));
 }
 // ============================================================================
 //  select() — configuration-based dispatch
