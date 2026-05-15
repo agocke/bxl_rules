@@ -297,11 +297,18 @@ export interface RuleContext<TResolved, TToolchain extends Toolchain> {
  */
 @@public
 export interface LabelResolver {
-    /** Resolve a single label to a SourceArtifact. */
-    resolve(label: Label): SourceArtifact;
+    /**
+     * Resolve a single label to an Artifact.
+     *
+     * String labels are resolved to `SourceArtifact` against the
+     * workspace, current directory, or external package map. An
+     * `Artifact` value passed as the label is returned as-is, allowing
+     * generated outputs from other actions to flow through.
+     */
+    resolve(label: Label): Artifact;
 
-    /** Resolve multiple labels to SourceArtifacts. */
-    resolveAll(labels: Label[]): SourceArtifact[];
+    /** Resolve multiple labels to Artifacts. See `resolve` for semantics. */
+    resolveAll(labels: Label[]): Artifact[];
 }
 
 @@public
@@ -353,8 +360,8 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
         const currentDir = d`${Context.getLastActiveUsePath().parent}`;
         const extPkgs = defn.externalPackages || Map.empty<string, StaticDirectory>();
         const resolver: LabelResolver = {
-            resolve: (label: Label) => sourceArtifact(resolveLabel(label, currentDir, extPkgs)),
-            resolveAll: (labels: Label[]) => resolveLabels(labels, currentDir, extPkgs).map(f => sourceArtifact(f))
+            resolve: (label: Label) => resolveLabel(label, currentDir, extPkgs),
+            resolveAll: (labels: Label[]) => resolveLabels(labels, currentDir, extPkgs)
         };
         const resolved = defn.resolve(args, resolver);
         const actions = createActions(args.name);
@@ -373,41 +380,54 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
  *   "BasicTest.cs"                     — local file in current package
  *   ":BasicTest.cs"                    — explicit local file reference
  *   "//path/to/pkg:filename"           — workspace-relative file reference
+ *   "@pkg//dir:file"                   — external package reference
+ *   <Artifact>                         — generated output, passed through
  *
- * Resolution is purely mechanical — labels encode paths directly:
+ * Resolution of string forms is purely mechanical — labels encode paths
+ * directly:
  *   "//artifacts/bin/System.Runtime/ref/Release/net11.0:System.Runtime.dll"
  *   → {workspace_root}/artifacts/bin/System.Runtime/ref/Release/net11.0/System.Runtime.dll
  *
- * Labels are strings, so File literals CANNOT be passed where Labels are
- * expected. This enforces that all file references go through the label
- * resolution system.
+ * An `Artifact` (e.g. the result of `sourceArtifact(file)` or an
+ * unbound output handle) may also be used directly. The framework
+ * passes it through without re-wrapping, so generated outputs from
+ * other actions can flow through `srcs`/`refs`/etc. like a Bazel
+ * `srcs = [":generated_target"]`.
  */
 @@public
-export type Label = string;
+export type Label = string | Artifact;
 
 // ============================================================================
 //  Label resolution — purely mechanical, no registry needed
 // ============================================================================
 
 /**
- * Resolve a label to a File. Internal — only accessible via LabelResolver.
+ * Resolve a label to an Artifact. Internal — only accessible via LabelResolver.
  *
- * Supports four label forms:
+ * Supports five label forms:
+ *   <Artifact>             — pass-through (generated outputs)
  *   "@pkg//dir:file"       — external package (StaticDirectory.assertExistence)
  *   "//pkg:file"           — workspace-relative
  *   ":file"                — current-directory-relative
  *   "file"                 — bare name (current directory)
  */
-function resolveLabel(label: Label, currentDir: Directory, externalPkgs: Map<string, StaticDirectory>): File {
+function resolveLabel(label: Label, currentDir: Directory, externalPkgs: Map<string, StaticDirectory>): Artifact {
+    // Artifact pass-through (generated outputs from other actions, or
+    // pre-wrapped source artifacts).
+    if (typeof label !== "string") {
+        return label as Artifact;
+    }
+
+    const labelStr = label as string;
     const workspaceRoot = d`${Context.getMount("SourceRoot").path}`;
 
     // @pkg//path:file — external package reference
-    if (label.startsWith("@")) {
-        const slashIdx = label.indexOf("//");
+    if (labelStr.startsWith("@")) {
+        const slashIdx = labelStr.indexOf("//");
         Contract.requires(slashIdx > 1,
-            `Invalid external label '${label}': expected '@pkg//path:file' format`);
-        const pkgName = label.slice(1, slashIdx);
-        const rest = label.slice(slashIdx + 2);
+            `Invalid external label '${labelStr}': expected '@pkg//path:file' format`);
+        const pkgName = labelStr.slice(1, slashIdx);
+        const rest = labelStr.slice(slashIdx + 2);
         const colonIdx = rest.indexOf(":");
         const dir = colonIdx >= 0 ? rest.slice(0, colonIdx) : "";
         const file = colonIdx >= 0 ? rest.slice(colonIdx + 1) : rest;
@@ -415,38 +435,38 @@ function resolveLabel(label: Label, currentDir: Directory, externalPkgs: Map<str
             `External package '${pkgName}' not registered in externalPackages`);
         const pkg = externalPkgs.get(pkgName);
         if (dir !== "") {
-            return pkg.assertExistence(r`${dir}/${file}`);
+            return sourceArtifact(pkg.assertExistence(r`${dir}/${file}`));
         }
-        return pkg.assertExistence(r`${file}`);
+        return sourceArtifact(pkg.assertExistence(r`${file}`));
     }
 
     // //path/to/pkg:filename — workspace-relative
-    if (label.startsWith("//")) {
-        const rest = label.slice(2);
+    if (labelStr.startsWith("//")) {
+        const rest = labelStr.slice(2);
         const colonIdx = rest.indexOf(":");
         if (colonIdx >= 0) {
             const pkg = rest.slice(0, colonIdx);
             const target = rest.slice(colonIdx + 1);
-            return f`${workspaceRoot}/${pkg}/${target}`;
+            return sourceArtifact(f`${workspaceRoot}/${pkg}/${target}`);
         }
         // //path/to/file (no colon — entire thing is a path)
-        return f`${workspaceRoot}/${rest}`;
+        return sourceArtifact(f`${workspaceRoot}/${rest}`);
     }
 
     // :filename — local reference
-    if (label.startsWith(":")) {
-        const localName = label.slice(1);
-        return f`${currentDir}/${localName}`;
+    if (labelStr.startsWith(":")) {
+        const localName = labelStr.slice(1);
+        return sourceArtifact(f`${currentDir}/${localName}`);
     }
 
     // bare name — local file
-    return f`${currentDir}/${label}`;
+    return sourceArtifact(f`${currentDir}/${labelStr}`);
 }
 
 /**
- * Resolve multiple labels to Files. Internal — only accessible via LabelResolver.
+ * Resolve multiple labels to Artifacts. Internal — only accessible via LabelResolver.
  */
-function resolveLabels(labels: Label[], currentDir: Directory, externalPkgs: Map<string, StaticDirectory>): File[] {
+function resolveLabels(labels: Label[], currentDir: Directory, externalPkgs: Map<string, StaticDirectory>): Artifact[] {
     return labels.map(l => resolveLabel(l, currentDir, externalPkgs));
 }
 // ============================================================================
