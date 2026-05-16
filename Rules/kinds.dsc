@@ -24,23 +24,41 @@ import {Transformer} from "Sdk.Transformers";
  * and downstream CI tooling:
  *
  *   - The `kind: "library" | "binary" | "test"` field on
- *     `Rules.rule({...})` (declared in providers.dsc). Every pip an
- *     impl schedules through `ctx.actions.run` is automatically tagged
- *     with the framework-owned `bxl-kind:*` tag for that kind. Rule
- *     authors do not see the tag string. Mapping to the Bazel CLI:
+ *     `Rules.rule({...})` (declared in providers.dsc). The Actions
+ *     adapter uses it to drive framework behaviour:
  *
- *         bazel test //...
- *           → bxl /f:tag='bxl-kind:test'
- *         bazel build //...
- *           → bxl   (default top-level)
+ *       kind        | ctx.actions auto-tag | ctx.runfilesActions
+ *       ------------|----------------------|--------------------------------
+ *       "library"   | (none)               | (not provided)
+ *       (undefined) | (none)               | (not provided)
+ *       "test"      | bxl-kind:test        | (not provided)
+ *       "binary"    | (none)               | provided; pips auto-tagged
+ *                   |                      | bxl-kind:binary
+ *
+ *     This split is the key to the Bazel build-vs-run benefit:
+ *
+ *       bazel build //...                     → bxl   (default top-level)
+ *       bazel test  //...                     → bxl /f:tag='bxl-kind:test'
+ *       bazel run   //x:bin   (selection)     → bxl /f:tag='bxl-kind:binary'
+ *
+ *     A plain `bxl` builds the binary's compiled output (which the rule
+ *     puts in `DefaultInfo.files` via `ctx.actions`) but does *not*
+ *     schedule the binary's runfiles staging (which the rule puts on the
+ *     separate `ctx.runfilesActions` adapter and exposes only via
+ *     `BinaryInfo.runScript`). `bxl /f:tag='bxl-kind:binary'` filters in
+ *     the runfiles-staging pips, which transitively pull the binary —
+ *     materialising the runnable form only when a runnable selection is
+ *     requested.
  *
  *   - `TestInfo`     — typed provider every `*_test` rule returns
  *                      alongside `DefaultInfo`. Carries the stamp +
  *                      runat artifacts, declared timeout, and user tags
- *                      (`"manual"`, `"long"`, `"flaky"`, ...).
+ *                      (`"manual"`, `"integration"`, ...).
  *   - `BinaryInfo`   — typed provider every `*_binary` rule returns
  *                      alongside `DefaultInfo`. Carries the runnable
- *                      binary and a generated invocation shim.
+ *                      binary (build-time) and a generated invocation
+ *                      shim produced via `ctx.runfilesActions`
+ *                      (run-time, deferred).
  *
  *   - `test_suite()` — aggregator macro that collects `TestInfo`
  *                      providers and emits a `<name>.tests.json`
@@ -50,11 +68,22 @@ import {Transformer} from "Sdk.Transformers";
  * Design notes
  * ------------
  *  - The `bxl-kind:*` tag vocabulary is *not* public. It is applied by
- *    the Actions adapter (see providers.dsc / `createActions`) using
- *    the package-private `kindTagFor()` helper below. Rule authors
- *    declare kind once on `Rules.rule({ kind: "test", ... })` and let
- *    the framework do the tagging — this keeps the tag string an
- *    implementation detail that can evolve without breaking callers.
+ *    the Actions adapter (see providers.dsc / `createActionsForRule`)
+ *    using the package-private `kindTagFor()` / `runfilesTagFor()`
+ *    helpers below. Rule authors declare kind once on
+ *    `Rules.rule({ kind: "binary", ... })` and let the framework do the
+ *    tagging — this keeps the tag string an implementation detail that
+ *    can evolve without breaking callers.
+ *  - For `kind: "binary"`, the framework hands the rule impl a second
+ *    `Actions` instance (`ctx.runfilesActions`). It shares the
+ *    target's output directory and single-binding claim-set with
+ *    `ctx.actions`, but everything scheduled through it is tagged
+ *    `bxl-kind:binary` (build pips on `ctx.actions` are not). Rule
+ *    authors are expected to schedule the compile via `ctx.actions`
+ *    (and include the resulting Artifact in `DefaultInfo.files`), and
+ *    schedule the run-script + runfiles tree staging via
+ *    `ctx.runfilesActions` (and expose those Artifacts only on
+ *    `BinaryInfo.runScript`, never in `DefaultInfo.files`).
  *  - Provider fields use `Artifact` (not raw `File`), in line with the
  *    rest of the rules SDK (see Rules/artifact.dsc). The stamp and
  *    runat outputs are produced by the test runner pip the rule author
@@ -96,12 +125,11 @@ export type RuleKind = "library" | "binary" | "test";
  * Well-known pip-tag values for differentiating rule kinds.
  *
  * Intentionally **not** `@@public`: the tag vocabulary is an SDK
- * implementation detail. The Actions adapter (createActions in
- * providers.dsc) applies one of these to every pip a kind-aware rule
- * schedules, using `kindTagFor()` below. CI drivers select by kind
- * using BuildXL's existing tag filter syntax against the *string
- * literal* — e.g. `bxl /f:tag='bxl-kind:test'` — never via this
- * constant.
+ * implementation detail. The Actions adapter applies these via the
+ * `kindTagFor` / `runfilesTagFor` helpers below; CI drivers select
+ * by kind using BuildXL's existing tag filter syntax against the
+ * *string literal* — e.g. `bxl /f:tag='bxl-kind:test'` — never via
+ * this constant.
  */
 const kindTags = {
     test: "bxl-kind:test",
@@ -109,15 +137,40 @@ const kindTags = {
 };
 
 /**
- * Map a declared `RuleKind` to the `bxl-kind:*` pip tag that the
- * Actions adapter should auto-apply to every pip the rule schedules.
- * Returns `undefined` for `"library"` (libraries are the default and
- * carry no kind tag) and for `undefined` input.
+ * Tag the framework attaches to every pip scheduled through the rule's
+ * **primary** Actions adapter (`ctx.actions`).
  *
- * Package-private — called from providers.dsc / `createActions` only.
+ *   "test"   → `bxl-kind:test`  (tests have no build-vs-run split;
+ *                                their compile + invoke pips both ride
+ *                                the kind tag, so `bxl /f:tag=...`
+ *                                pulls in the whole rule).
+ *   "binary" → undefined        (a binary's *build* pips intentionally
+ *                                carry no kind tag — they should be
+ *                                scheduled by a plain `bxl` build along
+ *                                with everything else's default outputs.
+ *                                The run-time staging pips get their tag
+ *                                from `runfilesTagFor` below.)
+ *   anything else → undefined.
+ *
+ * Package-private — called from providers.dsc / `createActionsForRule`.
  */
 export function kindTagFor(kind?: RuleKind): string {
-    if (kind === "test")   return kindTags.test;
+    if (kind === "test") return kindTags.test;
+    return undefined;
+}
+
+/**
+ * Tag the framework attaches to every pip scheduled through the rule's
+ * **runfiles** Actions adapter (`ctx.runfilesActions`).
+ *
+ *   "binary" → `bxl-kind:binary`
+ *   anything else → undefined  (only binary rules get a runfiles
+ *                               adapter; for non-binary kinds the
+ *                               framework does not surface one at all).
+ *
+ * Package-private — called from providers.dsc / `createActionsForRule`.
+ */
+export function runfilesTagFor(kind?: RuleKind): string {
     if (kind === "binary") return kindTags.binary;
     return undefined;
 }
@@ -279,6 +332,22 @@ export function testInfo(args: {
  * invocation shim for a label without knowing the specific rule type.
  *
  * Bazel equivalent: `RunInfo` (which Bazel uses to power `bazel run`).
+ *
+ * Build-vs-run split (mirrors Bazel)
+ * ----------------------------------
+ * - `binary` is the **build-time** output. The rule schedules it
+ *   through `ctx.actions` and includes it in `DefaultInfo.files`, so a
+ *   plain `bxl` (the `bazel build //...` analog) materialises the
+ *   executable.
+ * - `runScript` is the **run-time** output. The rule schedules it (and
+ *   any runfiles-tree staging) through `ctx.runfilesActions`, whose
+ *   pips carry the framework-owned `bxl-kind:binary` tag. It must
+ *   **not** appear in `DefaultInfo.files`. A plain `bxl` does not
+ *   reference it, so the runfiles staging is deferred. The runnable
+ *   form is materialised only when something explicitly selects it —
+ *   e.g. `bxl /f:tag='bxl-kind:binary'` (a `bazel run`-style target
+ *   selection) or `bxl /f:value='<label>'` driven by a `bxl-run`
+ *   wrapper that asks for `binaryInfo.runScript` directly.
  */
 @@public
 export interface BinaryInfo extends Provider {
@@ -288,14 +357,21 @@ export interface BinaryInfo extends Provider {
     /** Logical binary name (typically the rule's `name` attribute). */
     name: string;
 
-    /** The runnable artifact (bound). */
+    /**
+     * The compiled executable (bound). **Build-time** output —
+     * produced via `ctx.actions`; goes into `DefaultInfo.files`. A
+     * plain `bxl` build materialises this.
+     */
     binary: Artifact;
 
     /**
-     * Generated shim that invokes the binary correctly (e.g. picks up
-     * the right runtime / interpreter). A driver script `bxl-run`
-     * conceptually does: build this shim via
-     * `bxl /f:value='<label>'`, then exec it with the user's args.
+     * Generated shim that invokes the binary correctly (e.g. picks
+     * up the right runtime / interpreter), plus any runfiles-tree
+     * staging the binary needs. **Run-time** output — produced via
+     * `ctx.runfilesActions`; the underlying pip is tagged
+     * `bxl-kind:binary` and is *not* listed in `DefaultInfo.files`.
+     * `bxl /f:tag='bxl-kind:binary'` (or anything that references the
+     * Artifact directly) schedules it; a plain `bxl` build does not.
      */
     runScript: Artifact;
 }

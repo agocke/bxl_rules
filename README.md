@@ -480,7 +480,7 @@ Once tagged, BuildXL's existing `/f:tag='...'` filter syntax does the rest:
 | `bazel run //target` (target selection only)       | `bxl /f:tag='bxl-kind:binary'` ¹                              |
 | `bazel build //...`                                | `bxl` (default top-level)                                     |
 
-¹ Selection only. Bazel's `bazel run` additionally stages a runfiles tree and executes the binary; today `BinaryInfo.runScript` is treated as a plain output of the binary rule, so a normal build already materialises runfiles. Splitting build-time vs run-time outputs (to defer runfiles staging the way Bazel does) is a follow-up.
+¹ Selection only — schedules a `bazel run`-style target set without invoking. A binary rule's runfiles-staging pip is scheduled by this filter (because it's tagged `bxl-kind:binary`); a plain `bxl` build skips it. See "Build-vs-run split for binaries" below.
 
 ### 2. Typed providers: `TestInfo` and `BinaryInfo`
 
@@ -501,14 +501,22 @@ return {
     }),
 };
 
-// *_binary rule
+// *_binary rule — schedules build- and run-time outputs on separate adapters
+const bin  = ctx.actions.declareOutput(`${name}.dll`);
+const bBin = ctx.actions.run({ tool: tc.csc, arguments: [...], outputs: [bin] })[0];
+
+const shim  = ctx.runfilesActions.declareOutput(`${name}.sh`);
+const bShim = ctx.runfilesActions.writeFile(shim,
+    ["#!/bin/sh", `exec dotnet ${name}.dll "$@"`]);
+// (Stage native deps / runfiles tree on ctx.runfilesActions too.)
+
 return {
     kind: "DefaultInfo",
-    files: [Rules.getFile(binary), Rules.getFile(runScript)],
+    files: [Rules.getFile(bBin)],              // ⚠ build-time only; no runScript
     binaryInfo: Rules.binaryInfo({
         name:      ctx.args.name,
-        binary:    binary,
-        runScript: runScript,        // shim that picks the right runtime
+        binary:    bBin,                        // build-time output
+        runScript: bShim,                       // run-time, deferred
     }),
 };
 ```
@@ -516,6 +524,19 @@ return {
 Timeout precedence: explicit `timeoutSec` > `size`'s default > `"medium"` default (300s). Both providers carry `Artifact`s (not raw `File`s) so they compose with the rest of the SDK without leaking filesystem paths into BUILD code.
 
 There is intentionally **no** `LibraryInfo`. A library has no kind-specific metadata beyond its files, so `DefaultInfo` suffices.
+
+#### Build-vs-run split for binaries
+
+A binary's `RuleContext` gets two `Actions` adapters:
+
+| Adapter                | Auto-tag         | Goes in `DefaultInfo.files`? | Materialised by               |
+|------------------------|------------------|------------------------------|-------------------------------|
+| `ctx.actions`          | (none)           | yes                          | `bxl` (plain build)           |
+| `ctx.runfilesActions`  | `bxl-kind:binary`| **no** (expose via `BinaryInfo.runScript`) | `bxl /f:tag='bxl-kind:binary'` |
+
+Both share the target's output directory and single-binding claim set, so a path claimed on one cannot be re-claimed on the other. `ctx.runfilesActions` is `undefined` for non-binary kinds.
+
+This is the analog of Bazel's `bazel build` vs `bazel run` distinction: a plain build never stages runfiles trees, which can be a significant scheduling win on repos with many binaries.
 
 ### 3. `test_suite()` — JSON manifest aggregator
 

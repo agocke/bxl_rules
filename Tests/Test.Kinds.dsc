@@ -44,6 +44,10 @@ interface FakeTestResult extends Rules.DefaultInfo {
 const fakeTest = Rules.rule<FakeTestAttrs, FakeTestAttrs, Rules.Toolchain, FakeTestResult>({
     kind: "test",
     impl: (ctx) => {
+        // Non-binary kinds must not receive a runfilesActions adapter:
+        // the build-vs-run split only applies to binaries.
+        Contract.assert(ctx.runfilesActions === undefined,
+            "runfilesActions must be undefined for kind: \"test\"");
         const stamp = ctx.actions.declareOutput(`${ctx.args.name}.test.stamp`);
         const runat = ctx.actions.declareOutput(`${ctx.args.name}.test.runat`);
         const boundStamp = ctx.actions.writeFile(stamp, []);            // empty success marker
@@ -78,18 +82,50 @@ interface FakeBinResult extends Rules.DefaultInfo {
 const fakeBin = Rules.rule<FakeBinAttrs, FakeBinAttrs, Rules.Toolchain, FakeBinResult>({
     kind: "binary",
     impl: (ctx) => {
-        const bin   = ctx.actions.declareOutput(`${ctx.args.name}.exe`);
-        const shim  = ctx.actions.declareOutput(`${ctx.args.name}.run.sh`);
-        const bBin  = ctx.actions.writeFile(bin,  ["fake binary"]);
-        const bShim = ctx.actions.writeFile(shim, ["#!/bin/sh", `exec ./${ctx.args.name}.exe "$@"`]);
+        // Build-time output: the executable. Goes into DefaultInfo.files
+        // so a plain `bxl` build materialises it.
+        const bin  = ctx.actions.declareOutput(`${ctx.args.name}.exe`);
+        const bBin = ctx.actions.writeFile(bin, ["fake binary"]);
+
+        // Run-time output: the invocation shim. Scheduled on the
+        // separate runfilesActions adapter so its pip carries the
+        // `bxl-kind:binary` tag and a plain `bxl` build skips it.
+        // Deliberately NOT included in DefaultInfo.files — exposed
+        // only via BinaryInfo.runScript.
+        Contract.assert(ctx.runfilesActions !== undefined,
+            "runfilesActions must be provided for kind: \"binary\"");
+        const shim  = ctx.runfilesActions.declareOutput(`${ctx.args.name}.run.sh`);
+        const bShim = ctx.runfilesActions.writeFile(shim,
+            ["#!/bin/sh", `exec ./${ctx.args.name}.exe "$@"`]);
+
         return {
             kind: "DefaultInfo",
-            files: [Rules.getFile(bBin), Rules.getFile(bShim)],
+            files: [Rules.getFile(bBin)],          // build-time only
             binaryInfo: Rules.binaryInfo({
                 name: ctx.args.name,
                 binary: bBin,
-                runScript: bShim,
+                runScript: bShim,                   // run-time, deferred
             }),
+        };
+    },
+    resolve: (attrs, _r) => attrs,
+    toolchain: noopToolchain,
+});
+
+interface FakeLibAttrs {
+    name: string;
+}
+
+const fakeLib = Rules.rule<FakeLibAttrs, FakeLibAttrs, Rules.Toolchain, Rules.DefaultInfo>({
+    // No `kind` declared — library is the implicit default.
+    impl: (ctx) => {
+        Contract.assert(ctx.runfilesActions === undefined,
+            "runfilesActions must be undefined when kind is omitted");
+        const out  = ctx.actions.declareOutput(`${ctx.args.name}.lib`);
+        const bOut = ctx.actions.writeFile(out, ["fake library"]);
+        return {
+            kind: "DefaultInfo",
+            files: [Rules.getFile(bOut)],
         };
     },
     resolve: (attrs, _r) => attrs,
@@ -190,6 +226,31 @@ function test_binaryInfo_setsKindAndArtifacts(): string {
     return "ok";
 }
 
+function test_binary_defaultInfoExcludesRunScript(): string {
+    // The build-vs-run split: DefaultInfo.files carries only the
+    // build-time output (binary). The runScript is exposed only via
+    // BinaryInfo so a plain `bxl` build doesn't materialise runfiles
+    // staging.
+    const r = fakeBin({ name: "kinds-b-split" });
+    Contract.assert(r.files.length === 1,
+        `binary DefaultInfo.files must contain only the build-time binary; got ${r.files.length} files`);
+    const onlyFile = r.files[0];
+    const expectedSuffix = "kinds-b-split.exe";
+    Contract.assert(onlyFile.path.toDiagnosticString().endsWith(expectedSuffix),
+        `DefaultInfo.files[0] must be the compiled binary ending in "${expectedSuffix}"; got "${onlyFile.path.toDiagnosticString()}"`);
+    return "ok";
+}
+
+function test_library_hasNoRunfilesAdapter(): string {
+    // Implicit `kind: "library"` (no kind declared). The impl asserts
+    // ctx.runfilesActions === undefined; invoking it would fail
+    // evaluation if the framework wrongly provided the adapter.
+    const r = fakeLib({ name: "kinds-l-default" });
+    Contract.assert(r.files.length === 1,
+        `library DefaultInfo.files must contain one file; got ${r.files.length}`);
+    return "ok";
+}
+
 // ----------------------------------------------------------------------------
 // test_suite — manifest pip wires the tests in via DefaultInfo
 // ----------------------------------------------------------------------------
@@ -232,5 +293,7 @@ function test_testSuite_aggregatesStampAndRunatPerTest(): string {
 @@public export const k04 = test_testInfo_flakyIsRecorded();
 @@public export const k05 = test_testInfo_preservesUserTags();
 @@public export const k06 = test_binaryInfo_setsKindAndArtifacts();
-@@public export const k07 = test_testSuite_emptyTests_yieldsManifestAlone();
-@@public export const k08 = test_testSuite_aggregatesStampAndRunatPerTest();
+@@public export const k07 = test_binary_defaultInfoExcludesRunScript();
+@@public export const k08 = test_library_hasNoRunfilesAdapter();
+@@public export const k09 = test_testSuite_emptyTests_yieldsManifestAlone();
+@@public export const k10 = test_testSuite_aggregatesStampAndRunatPerTest();
