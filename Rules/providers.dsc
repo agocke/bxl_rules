@@ -340,11 +340,17 @@ export interface RuleDefinition<TAttrs, TResolved, TToolchain extends Toolchain,
     /**
      * Rule kind — drives framework behaviour, not exposed to callers.
      *
-     *   "library" (default) — no kind tag; the catch-all.
+     *   "library" (default) — no kind tag; the catch-all. Bazel has no
+     *                         `bazel build`-equivalent kind verb because
+     *                         `bazel build` operates on every kind's
+     *                         default outputs uniformly; `bxl` works the
+     *                         same way.
      *   "binary"            — every pip the impl schedules is tagged
      *                         with the framework-owned `bxl-kind:binary`,
-     *                         so `bxl /f:tag='bxl-kind:binary'` picks
-     *                         the rule up (Bazel `bazel build` analog).
+     *                         so `bxl /f:tag='bxl-kind:binary'` selects
+     *                         the runnable executables (Bazel `bazel run`
+     *                         target-selection analog — selects, not yet
+     *                         executes).
      *   "test"              — every pip the impl schedules is tagged
      *                         with `bxl-kind:test`, so
      *                         `bxl /f:tag='bxl-kind:test'` picks it up
@@ -353,6 +359,16 @@ export interface RuleDefinition<TAttrs, TResolved, TToolchain extends Toolchain,
      * The tag string itself is an SDK implementation detail (see
      * `kindTagFor` in kinds.dsc); rule authors declare kind once here
      * and the Actions adapter handles tagging.
+     *
+     * Limitation (vs. Bazel): the Bazel `build` vs `run` split exists
+     * partly to defer runfiles staging until `run` is asked for. We do
+     * not yet model that. Today `BinaryInfo.runScript` is a regular
+     * Artifact, and binary rule authors typically include it in
+     * `DefaultInfo.files`, so a plain build already materialises
+     * runfiles. A future change would split a binary's outputs into a
+     * "build" set (just the executable) and a "run" set (shim +
+     * runfiles tree) and have the framework schedule the latter only
+     * when the binary kind is selected.
      */
     kind?: RuleKind;
 }

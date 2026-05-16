@@ -477,7 +477,10 @@ Once tagged, BuildXL's existing `/f:tag='...'` filter syntax does the rest:
 |----------------------------------------------------|---------------------------------------------------------------|
 | `bazel test //...`                                 | `bxl /f:tag='bxl-kind:test'`                                  |
 | `bazel test //... --test_tag_filters=-manual`      | `bxl /f:tag='bxl-kind:test'and(not(tag='manual'))`            |
+| `bazel run //target` (target selection only)       | `bxl /f:tag='bxl-kind:binary'` ¹                              |
 | `bazel build //...`                                | `bxl` (default top-level)                                     |
+
+¹ Selection only. Bazel's `bazel run` additionally stages a runfiles tree and executes the binary; today `BinaryInfo.runScript` is treated as a plain output of the binary rule, so a normal build already materialises runfiles. Splitting build-time vs run-time outputs (to defer runfiles staging the way Bazel does) is a follow-up.
 
 ### 2. Typed providers: `TestInfo` and `BinaryInfo`
 
