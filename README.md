@@ -459,64 +459,77 @@ import * as Rules from "Sdk.Rules";
 const my_test = Rules.rule<MyAttrs, MyResolved, MyToolchain, MyResult>({
     kind: "test",          // "library" | "binary" | "test"
     impl: (ctx) => {
-        // Every pip ctx.actions.run schedules from here gets
-        // tagged `bxl-kind:test` by the framework.
-        ctx.actions.run({ tool: tc.runner, arguments: [...], outputs: [stamp, runat] });
-        return { kind: "DefaultInfo", files: [...], testInfo: ... };
+        // Build-time: compile the test exe on ctx.actions (untagged;
+        // materialised by a plain `bxl` build, like `bazel build`).
+        const exe  = ctx.actions.declareOutput(`${ctx.args.name}.test.exe`);
+        const bExe = ctx.actions.run({ tool: tc.csc, arguments: [...], outputs: [exe] })[0];
+
+        // Run-time: invoke the runner on ctx.runActions (auto-tagged
+        // `bxl-kind:test`; only scheduled when explicitly requested).
+        ctx.runActions.run({ tool: tc.runner, arguments: [...], outputs: [stamp, runat] });
+
+        return { kind: "DefaultInfo", files: [Rules.getFile(bExe)], testInfo: ... };
     },
     resolve: (attrs, _r) => attrs,
     toolchain: noopToolchain,
 });
 ```
 
-`kind` is optional — omit it for the default "library" case, which gets no extra pip tag. The underlying tag vocabulary (`bxl-kind:test`, `bxl-kind:binary`) is intentionally **not** part of the public API: rule authors never write the string, and CI drivers only care about the filter spelling below.
+`kind` is optional — omit it for the default "library" case, which gets no extra pip tag and no `ctx.runActions` adapter. The underlying tag vocabulary (`bxl-kind:test`, `bxl-kind:binary`) is intentionally **not** part of the public API: rule authors never write the string, and CI drivers only care about the filter spelling below.
 
 Once tagged, BuildXL's existing `/f:tag='...'` filter syntax does the rest:
 
 | Bazel                                              | bxl_rules                                                     |
 |----------------------------------------------------|---------------------------------------------------------------|
-| `bazel test //...`                                 | `bxl /f:tag='bxl-kind:test'`                                  |
+| `bazel test //...`                                 | `bxl /f:tag='bxl-kind:test'` ¹                                |
 | `bazel test //... --test_tag_filters=-manual`      | `bxl /f:tag='bxl-kind:test'and(not(tag='manual'))`            |
 | `bazel run //target` (target selection only)       | `bxl /f:tag='bxl-kind:binary'` ¹                              |
 | `bazel build //...`                                | `bxl` (default top-level)                                     |
 
-¹ Selection only — schedules a `bazel run`-style target set without invoking. A binary rule's runfiles-staging pip is scheduled by this filter (because it's tagged `bxl-kind:binary`); a plain `bxl` build skips it. See "Build-vs-run split for binaries" below.
+¹ Selection only — schedules the run-time pips for the chosen kind. Build-time compilation of every test / binary still happens via plain `bxl`; the kind filter additionally pulls in the *test runner* (or binary *runfiles-staging*) pip that the rule scheduled on `ctx.runActions`. See "Build-vs-run/test split" below.
 
 ### 2. Typed providers: `TestInfo` and `BinaryInfo`
 
 Every kind-aware rule returns one of these alongside its `DefaultInfo`. `TestInfo` carries typed `size` and `flaky` fields (mirroring Bazel's `*_test` attribute family); `timeoutSec` is derived from `size` when not given explicitly.
 
 ```typescript
-// *_test rule
+// *_test rule — build-time compile + run-time runner on separate adapters
+const exe  = ctx.actions.declareOutput(`${name}.test.exe`);
+const bExe = ctx.actions.run({ tool: tc.csc, arguments: [...], outputs: [exe] })[0];
+
+const stamp = ctx.runActions.declareOutput(`${name}.test.stamp`);
+const runat = ctx.runActions.declareOutput(`${name}.test.runat`);
+ctx.runActions.run({ tool: tc.runner, arguments: [...], outputs: [stamp, runat] });
+
 return {
     kind: "DefaultInfo",
-    files: [Rules.getFile(stamp), Rules.getFile(runat)],
+    files: [Rules.getFile(bExe)],            // ⚠ build-time only; no stamp/runat
     testInfo: Rules.testInfo({
         name:  ctx.args.name,
-        stamp: stamp,                // bound Artifact — empty success marker
-        runat: runat,                // bound Artifact — captures `date +%s%N`
-        size:  "small",              // → timeoutSec: 60 (medium=300, large=900, enormous=3600)
-        flaky: false,                // optional retry-on-failure intent
-        tags:  ["integration"],      // user tags ("manual", "exclusive", ...)
+        stamp: stamp,                        // bound Artifact — empty success marker (run-time)
+        runat: runat,                        // bound Artifact — captures `date +%s%N` (run-time)
+        size:  "small",                      // → timeoutSec: 60 (medium=300, large=900, enormous=3600)
+        flaky: false,                        // optional retry-on-failure intent
+        tags:  ["integration"],              // user tags ("manual", "exclusive", ...)
     }),
 };
 
-// *_binary rule — schedules build- and run-time outputs on separate adapters
+// *_binary rule — same shape: compile on ctx.actions, runScript on ctx.runActions
 const bin  = ctx.actions.declareOutput(`${name}.dll`);
 const bBin = ctx.actions.run({ tool: tc.csc, arguments: [...], outputs: [bin] })[0];
 
-const shim  = ctx.runfilesActions.declareOutput(`${name}.sh`);
-const bShim = ctx.runfilesActions.writeFile(shim,
+const shim  = ctx.runActions.declareOutput(`${name}.sh`);
+const bShim = ctx.runActions.writeFile(shim,
     ["#!/bin/sh", `exec dotnet ${name}.dll "$@"`]);
-// (Stage native deps / runfiles tree on ctx.runfilesActions too.)
+// (Stage native deps / runfiles tree on ctx.runActions too.)
 
 return {
     kind: "DefaultInfo",
-    files: [Rules.getFile(bBin)],              // ⚠ build-time only; no runScript
+    files: [Rules.getFile(bBin)],            // ⚠ build-time only; no runScript
     binaryInfo: Rules.binaryInfo({
         name:      ctx.args.name,
-        binary:    bBin,                        // build-time output
-        runScript: bShim,                       // run-time, deferred
+        binary:    bBin,                     // build-time output
+        runScript: bShim,                    // run-time, deferred
     }),
 };
 ```
@@ -525,18 +538,18 @@ Timeout precedence: explicit `timeoutSec` > `size`'s default > `"medium"` defaul
 
 There is intentionally **no** `LibraryInfo`. A library has no kind-specific metadata beyond its files, so `DefaultInfo` suffices.
 
-#### Build-vs-run split for binaries
+#### Build-vs-run/test split
 
-A binary's `RuleContext` gets two `Actions` adapters:
+`binary` and `test` rules each receive two `Actions` adapters on `RuleContext`:
 
-| Adapter                | Auto-tag         | Goes in `DefaultInfo.files`? | Materialised by               |
-|------------------------|------------------|------------------------------|-------------------------------|
-| `ctx.actions`          | (none)           | yes                          | `bxl` (plain build)           |
-| `ctx.runfilesActions`  | `bxl-kind:binary`| **no** (expose via `BinaryInfo.runScript`) | `bxl /f:tag='bxl-kind:binary'` |
+| Adapter           | Auto-tag                      | Goes in `DefaultInfo.files`?                                | Materialised by                                 |
+|-------------------|-------------------------------|-------------------------------------------------------------|-------------------------------------------------|
+| `ctx.actions`     | (none)                        | yes                                                         | `bxl` (plain build)                             |
+| `ctx.runActions`  | `bxl-kind:binary` / `…:test`  | **no** (expose via `BinaryInfo.runScript` / `TestInfo.stamp`+`runat`) | `bxl /f:tag='bxl-kind:binary'` / `…:test`       |
 
-Both share the target's output directory and single-binding claim set, so a path claimed on one cannot be re-claimed on the other. `ctx.runfilesActions` is `undefined` for non-binary kinds.
+Both share the target's output directory and single-binding claim set, so a path claimed on one cannot be re-claimed on the other. `ctx.runActions` is `undefined` for library kinds (the default).
 
-This is the analog of Bazel's `bazel build` vs `bazel run` distinction: a plain build never stages runfiles trees, which can be a significant scheduling win on repos with many binaries.
+This is the analog of Bazel's `bazel build` vs `bazel run` / `bazel test` distinction: a plain build compiles everything but never stages runfiles trees or invokes test runners, which can be a significant scheduling win on repos with many binaries and tests.
 
 ### 3. `test_suite()` — JSON manifest aggregator
 
@@ -619,7 +632,7 @@ If you know Bazel, here's the quick correspondence:
 | `cfg = "exec"` (Bazel) / `cfg.exec` (Buck2) | `Rules.makeExecTransition({os, cpu})` (no singleton: workspaces declare their host vocabulary) |
 | `TestInfo`, `RunInfo` | `Rules.TestInfo`, `Rules.BinaryInfo` |
 | `test_suite()` | `Rules.test_suite({ name, tests })` |
-| `*_test` / `*_binary` rule kind | `kind: "test"` / `kind: "binary"` on `Rules.rule({...})` (auto-applies the framework-internal `bxl-kind:*` pip tag; filter with `/f:tag='bxl-kind:test'`) |
+| `*_test` / `*_binary` rule kind | `kind: "test"` / `kind: "binary"` on `Rules.rule({...})` (provides `ctx.runActions`, which auto-applies the framework-internal `bxl-kind:*` pip tag to run-time pips; filter with `/f:tag='bxl-kind:test'`) |
 | `size = "small"` / `flaky = True` (Bazel test attrs) | `Rules.testInfo({ size: "small", flaky: true, ... })` (typed; `size` derives `timeoutSec`) |
 | `visibility = ["//visibility:public"]` | `@@public export` |
 | Starlark (Python-like) | DScript (TypeScript-like) |

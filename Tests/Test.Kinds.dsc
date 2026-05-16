@@ -44,14 +44,23 @@ interface FakeTestResult extends Rules.DefaultInfo {
 const fakeTest = Rules.rule<FakeTestAttrs, FakeTestAttrs, Rules.Toolchain, FakeTestResult>({
     kind: "test",
     impl: (ctx) => {
-        // Non-binary kinds must not receive a runfilesActions adapter:
-        // the build-vs-run split only applies to binaries.
-        Contract.assert(ctx.runfilesActions === undefined,
-            "runfilesActions must be undefined for kind: \"test\"");
-        const stamp = ctx.actions.declareOutput(`${ctx.args.name}.test.stamp`);
-        const runat = ctx.actions.declareOutput(`${ctx.args.name}.test.runat`);
-        const boundStamp = ctx.actions.writeFile(stamp, []);            // empty success marker
-        const boundRunat = ctx.actions.writeFile(runat, ["0"]);          // fake timestamp
+        // Build-time output: the compiled test executable. Goes into
+        // DefaultInfo.files, so a plain `bxl` compiles tests without
+        // running them — the `bazel build :test_target` analog.
+        const exe  = ctx.actions.declareOutput(`${ctx.args.name}.test.exe`);
+        const bExe = ctx.actions.writeFile(exe, ["fake test exe"]);
+
+        // Run-time outputs: stamp + runat are written by the runner
+        // pip, scheduled on runActions so the pip carries
+        // `bxl-kind:test` and is skipped by a plain `bxl` build.
+        // Deliberately NOT included in DefaultInfo.files.
+        Contract.assert(ctx.runActions !== undefined,
+            "runActions must be provided for kind: \"test\"");
+        const stamp = ctx.runActions.declareOutput(`${ctx.args.name}.test.stamp`);
+        const runat = ctx.runActions.declareOutput(`${ctx.args.name}.test.runat`);
+        const boundStamp = ctx.runActions.writeFile(stamp, []);          // empty success marker
+        const boundRunat = ctx.runActions.writeFile(runat, ["0"]);        // fake timestamp
+
         const info = Rules.testInfo({
             name: ctx.args.name,
             stamp: boundStamp,
@@ -63,7 +72,7 @@ const fakeTest = Rules.rule<FakeTestAttrs, FakeTestAttrs, Rules.Toolchain, FakeT
         });
         return {
             kind: "DefaultInfo",
-            files: [Rules.getFile(boundStamp), Rules.getFile(boundRunat)],
+            files: [Rules.getFile(bExe)],          // build-time only
             testInfo: info,
         };
     },
@@ -88,14 +97,14 @@ const fakeBin = Rules.rule<FakeBinAttrs, FakeBinAttrs, Rules.Toolchain, FakeBinR
         const bBin = ctx.actions.writeFile(bin, ["fake binary"]);
 
         // Run-time output: the invocation shim. Scheduled on the
-        // separate runfilesActions adapter so its pip carries the
+        // separate runActions adapter so its pip carries the
         // `bxl-kind:binary` tag and a plain `bxl` build skips it.
         // Deliberately NOT included in DefaultInfo.files — exposed
         // only via BinaryInfo.runScript.
-        Contract.assert(ctx.runfilesActions !== undefined,
-            "runfilesActions must be provided for kind: \"binary\"");
-        const shim  = ctx.runfilesActions.declareOutput(`${ctx.args.name}.run.sh`);
-        const bShim = ctx.runfilesActions.writeFile(shim,
+        Contract.assert(ctx.runActions !== undefined,
+            "runActions must be provided for kind: \"binary\"");
+        const shim  = ctx.runActions.declareOutput(`${ctx.args.name}.run.sh`);
+        const bShim = ctx.runActions.writeFile(shim,
             ["#!/bin/sh", `exec ./${ctx.args.name}.exe "$@"`]);
 
         return {
@@ -119,8 +128,8 @@ interface FakeLibAttrs {
 const fakeLib = Rules.rule<FakeLibAttrs, FakeLibAttrs, Rules.Toolchain, Rules.DefaultInfo>({
     // No `kind` declared — library is the implicit default.
     impl: (ctx) => {
-        Contract.assert(ctx.runfilesActions === undefined,
-            "runfilesActions must be undefined when kind is omitted");
+        Contract.assert(ctx.runActions === undefined,
+            "runActions must be undefined when kind is omitted");
         const out  = ctx.actions.declareOutput(`${ctx.args.name}.lib`);
         const bOut = ctx.actions.writeFile(out, ["fake library"]);
         return {
@@ -241,9 +250,26 @@ function test_binary_defaultInfoExcludesRunScript(): string {
     return "ok";
 }
 
-function test_library_hasNoRunfilesAdapter(): string {
+function test_test_defaultInfoExcludesStampAndRunat(): string {
+    // Tests share the binary-style build-vs-run split: DefaultInfo.files
+    // carries only the compiled test exe (build-time). stamp and runat
+    // are run-time outputs exposed via TestInfo, scheduled through
+    // ctx.runActions, and tagged `bxl-kind:test` so a plain `bxl` build
+    // does NOT execute the test — only `bxl /f:tag='bxl-kind:test'`
+    // (or a test_suite reference) does.
+    const r = fakeTest({ name: "kinds-t-split" });
+    Contract.assert(r.files.length === 1,
+        `test DefaultInfo.files must contain only the build-time test exe; got ${r.files.length} files`);
+    const onlyFile = r.files[0];
+    const expectedSuffix = "kinds-t-split.test.exe";
+    Contract.assert(onlyFile.path.toDiagnosticString().endsWith(expectedSuffix),
+        `DefaultInfo.files[0] must be the compiled test exe ending in "${expectedSuffix}"; got "${onlyFile.path.toDiagnosticString()}"`);
+    return "ok";
+}
+
+function test_library_hasNoRunActionsAdapter(): string {
     // Implicit `kind: "library"` (no kind declared). The impl asserts
-    // ctx.runfilesActions === undefined; invoking it would fail
+    // ctx.runActions === undefined; invoking it would fail
     // evaluation if the framework wrongly provided the adapter.
     const r = fakeLib({ name: "kinds-l-default" });
     Contract.assert(r.files.length === 1,
@@ -294,6 +320,7 @@ function test_testSuite_aggregatesStampAndRunatPerTest(): string {
 @@public export const k05 = test_testInfo_preservesUserTags();
 @@public export const k06 = test_binaryInfo_setsKindAndArtifacts();
 @@public export const k07 = test_binary_defaultInfoExcludesRunScript();
-@@public export const k08 = test_library_hasNoRunfilesAdapter();
+@@public export const k08 = test_library_hasNoRunActionsAdapter();
 @@public export const k09 = test_testSuite_emptyTests_yieldsManifestAlone();
 @@public export const k10 = test_testSuite_aggregatesStampAndRunatPerTest();
+@@public export const k11 = test_test_defaultInfoExcludesStampAndRunat();

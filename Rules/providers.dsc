@@ -290,35 +290,37 @@ export interface RuleContext<TResolved, TToolchain extends Toolchain> {
      * compiled assembly, generated headers, etc. Put the resulting
      * Artifacts in `DefaultInfo.files`.
      *
-     * For `kind: "test"`, pips scheduled through this adapter are
-     * automatically tagged `bxl-kind:test` (so
-     * `bxl /f:tag='bxl-kind:test'` selects the rule). For `kind:
-     * "binary"` and `kind: "library"`, this adapter carries no kind
-     * tag — binaries reserve the `bxl-kind:binary` tag for the
-     * `runfilesActions` adapter below.
+     * Build-time pips are intentionally untagged regardless of kind,
+     * so a plain `bxl` build picks them up uniformly. Run-time pips
+     * (binary runfiles staging, test-runner invocation) live on the
+     * separate `runActions` adapter below.
      */
     actions: Actions;
 
     /**
-     * Action helpers for run-time outputs — present **only** when the
-     * rule was declared with `kind: "binary"`. Everything scheduled
-     * here is what a `bazel run`-style selection materialises:
-     * the invocation shim, runfiles tree staging, native-dep copies,
-     * etc. Pips scheduled through this adapter are automatically
-     * tagged `bxl-kind:binary`.
+     * Action helpers for run-time outputs — present **only** for
+     * `kind: "binary"` and `kind: "test"`. Everything scheduled here
+     * is what a `bazel run` / `bazel test`-style selection
+     * materialises: for binaries, the invocation shim and runfiles
+     * tree staging; for tests, the runner pip that produces stamp +
+     * runat (plus any test-data staging). Pips scheduled through this
+     * adapter are automatically tagged with the matching `bxl-kind:*`
+     * value (`bxl-kind:binary` or `bxl-kind:test`).
      *
      * Crucially, the Artifacts produced here must **not** appear in
-     * `DefaultInfo.files`. They should be exposed only via
-     * `BinaryInfo.runScript`. A plain `bxl` build then skips the
-     * staging entirely; `bxl /f:tag='bxl-kind:binary'` (or anything
-     * that references the run-time Artifacts directly) pulls them in
-     * along with the binary itself.
+     * `DefaultInfo.files`. They should be exposed only via the
+     * per-kind provider (`BinaryInfo.runScript`, `TestInfo.stamp`,
+     * `TestInfo.runat`). A plain `bxl` build then skips run-time work
+     * entirely; `bxl /f:tag='bxl-kind:binary'` or
+     * `bxl /f:tag='bxl-kind:test'` (or anything that references the
+     * run-time Artifacts directly) pulls them in along with the
+     * build-time outputs they depend on.
      *
      * Shares the target's output directory and single-binding claim
      * set with `ctx.actions`, so the same path cannot be claimed
      * twice across the two adapters.
      */
-    runfilesActions?: Actions;
+    runActions?: Actions;
 }
 
 // ============================================================================
@@ -436,7 +438,7 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
             args: resolved,
             toolchain: defn.toolchain,
             actions: rt.actions,
-            runfilesActions: rt.runfilesActions,
+            runActions: rt.runActions,
         });
     };
 }
@@ -565,29 +567,29 @@ export function select<T>(conditions: [string, T][], matches: (key: string) => b
 
 /**
  * Per-rule bundle returned by `createActionsForRule` — the build-time
- * Actions adapter plus, for binary kind, a runfiles Actions adapter.
- * `runfilesActions` is `undefined` for non-binary kinds.
+ * Actions adapter plus, for binary and test kinds, a run-time Actions
+ * adapter. `runActions` is `undefined` for library kind / unspecified.
  */
 interface RuleActions {
     actions: Actions;
-    runfilesActions?: Actions;
+    runActions?: Actions;
 }
 
 /**
  * Build the per-rule Actions bundle for a `kind`. Centralises the
- * kind→tag mapping (via `kindTagFor` / `runfilesTagFor`) so the rest
+ * kind→tag mapping (via `kindTagFor` / `runTagFor`) so the rest
  * of providers.dsc never inspects `RuleKind` directly.
  *
- *   kind        | actions auto-tag | runfilesActions
+ *   kind        | actions auto-tag | runActions
  *   ------------|------------------|-----------------------------
  *   "library"   | (none)           | (not provided)
  *   undefined   | (none)           | (not provided)
- *   "test"      | bxl-kind:test    | (not provided)
  *   "binary"    | (none)           | provided (auto-tag bxl-kind:binary)
+ *   "test"      | (none)           | provided (auto-tag bxl-kind:test)
  *
- * The two adapters for a binary rule share a single output directory
- * and a single `claimedPaths` set, so an output path claimed via
- * `ctx.actions` cannot be re-claimed via `ctx.runfilesActions` (or
+ * For binary and test kinds the two adapters share a single output
+ * directory and a single `claimedPaths` set, so an output path claimed
+ * via `ctx.actions` cannot be re-claimed via `ctx.runActions` (or
  * vice versa).
  */
 function createActionsForRule(targetName: string, kind?: RuleKind): RuleActions {
@@ -598,11 +600,10 @@ function createActionsForRule(targetName: string, kind?: RuleKind): RuleActions 
     const buildTags = buildTag !== undefined ? [buildTag] : undefined;
     const actions = createActions(targetName, targetDir, claimedPaths, buildTags);
 
-    if (kind === "binary") {
-        const runTag = runfilesTagFor(kind);
-        const runTags = runTag !== undefined ? [runTag] : undefined;
-        const runfilesActions = createActions(targetName, targetDir, claimedPaths, runTags);
-        return { actions: actions, runfilesActions: runfilesActions };
+    const runTag = runTagFor(kind);
+    if (runTag !== undefined) {
+        const runActions = createActions(targetName, targetDir, claimedPaths, [runTag]);
+        return { actions: actions, runActions: runActions };
     }
 
     return { actions: actions };
