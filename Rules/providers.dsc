@@ -229,8 +229,14 @@ export interface Actions {
  */
 @@public
 export interface RunArgs {
-    /** The executable to run. */
-    tool: File;
+    /**
+     * The executable to run. An `Artifact` — typically a
+     * `SourceArtifact` (toolchain-provided tool) or a bound output of
+     * an earlier action (a freshly-built tool). The adapter extracts
+     * the underlying `File` via `getFile()` before handing it to
+     * `Transformer.execute`.
+     */
+    tool: Artifact;
 
     /** Command-line arguments. Use Cmd helpers for output references. */
     arguments: Argument[];
@@ -561,7 +567,7 @@ function createActions(targetName: string, ruleKind?: RuleKind): Actions {
 
             const execResult = Transformer.execute({
                 tool: {
-                    exe: args.tool,
+                    exe: getFile(args.tool),
                     dependsOnCurrentHostOSDirectories: true
                 },
                 arguments: args.arguments,
