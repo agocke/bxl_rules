@@ -38,21 +38,25 @@ import {Transformer} from "Sdk.Transformers";
  *
  *     This split is the key to the Bazel build-vs-run/test benefit:
  *
- *       bazel build //...                     → bxl   (default top-level)
- *       bazel test  //...                     → bxl /f:tag='bxl-kind:test'
- *       bazel run   //x:bin   (selection)     → bxl /f:tag='bxl-kind:binary'
+ *       bazel build //...     → bxl /f:~(tag='bxl-kind:binary')and
+ *                                    ~(tag='bxl-kind:test')
+ *       bazel test  //...     → bxl /f:tag='bxl-kind:test'
+ *       bazel run   //x:bin   → bxl /f:tag='bxl-kind:binary'
  *
- *     A plain `bxl` builds every rule's compiled outputs (which rules
- *     put in `DefaultInfo.files` via `ctx.actions`) but does *not*
- *     schedule run-time pips — runfiles staging for binaries, runfiles
- *     staging plus the actual test-runner invocation for tests. Those
- *     are scheduled on `ctx.runActions` and exposed only on the
- *     per-kind provider (`BinaryInfo.runScript`, `TestInfo.stamp` /
- *     `TestInfo.runat`). `bxl /f:tag='bxl-kind:binary'` /
- *     `bxl /f:tag='bxl-kind:test'` filter the relevant run-time pips
- *     in, which transitively pull the build-time outputs — so the
- *     runnable / runnable-test form is materialised only when a
- *     runnable selection is requested.
+ *     BuildXL's default filter (no `/f:`) runs *every* pip in the
+ *     graph, so a bare `bxl` is "build + run everything", with no
+ *     Bazel direct analog. The `bazel build //...` form requires an
+ *     *exclusion* filter that drops the `bxl-kind:*` tags — the run-
+ *     time pips are then skipped, and only the rules' build-time
+ *     outputs (`ctx.actions`, in `DefaultInfo.files`) materialise.
+ *     Conversely, the positive `/f:tag='...'` filters are transitive
+ *     in BuildXL: they pull in the build-time pips the selected run-
+ *     time pip depends on, so a `bazel run`-style selection builds
+ *     the binary too.
+ *
+ *     Wrap the exclusion filter in a CI driver / shell alias so
+ *     end users get `bazel build`-like ergonomics from a single
+ *     command.
  *
  *   - `TestInfo`     — typed provider every `*_test` rule returns
  *                      alongside `DefaultInfo`. Carries the stamp +
@@ -223,15 +227,18 @@ function defaultTimeoutForSize(size: TestSize): number {
  * -----------------------------------
  * - The compiled test binary is the **build-time** output. The rule
  *   schedules it through `ctx.actions` and includes it in
- *   `DefaultInfo.files`, so a plain `bxl` (the `bazel build //...`
- *   analog) compiles the test without running it.
+ *   `DefaultInfo.files`, so the `bazel build //...` analog
+ *   (`bxl /f:~(tag='bxl-kind:binary')and~(tag='bxl-kind:test')`)
+ *   compiles the test without running it.
  * - `stamp` and `runat` are **run-time** outputs, produced by the
  *   test-runner pip the rule schedules through `ctx.runActions` (which
  *   auto-tags `bxl-kind:test`). They must **not** appear in
- *   `DefaultInfo.files`. A plain `bxl` build does not reference them,
- *   so the runner pip is deferred. `bxl /f:tag='bxl-kind:test'` (the
- *   `bazel test //...` analog) — or referencing a `test_suite` value
- *   that aggregates them — schedules execution.
+ *   `DefaultInfo.files`. The exclusion filter above drops the tagged
+ *   pip; `bxl /f:tag='bxl-kind:test'` (the `bazel test //...` analog)
+ *   — or referencing a `test_suite` value that aggregates them —
+ *   schedules execution. Note that a bare `bxl` with no filter runs
+ *   *all* pips (BuildXL's default), so it executes the test too; the
+ *   build-vs-test distinction is filter-driven, not default-driven.
  *
  * Both `stamp` and `runat` must be **bound** Artifacts produced by the
  * test runner pip. The runner writes an empty stamp on success and
@@ -359,18 +366,20 @@ export function testInfo(args: {
  * Build-vs-run split (mirrors Bazel)
  * ----------------------------------
  * - `binary` is the **build-time** output. The rule schedules it
- *   through `ctx.actions` and includes it in `DefaultInfo.files`, so a
- *   plain `bxl` (the `bazel build //...` analog) materialises the
- *   executable.
+ *   through `ctx.actions` and includes it in `DefaultInfo.files`, so
+ *   the `bazel build //...` analog
+ *   (`bxl /f:~(tag='bxl-kind:binary')and~(tag='bxl-kind:test')`)
+ *   materialises the executable without staging runfiles.
  * - `runScript` is the **run-time** output. The rule schedules it (and
  *   any runfiles-tree staging) through `ctx.runActions`, whose pips
  *   carry the framework-owned `bxl-kind:binary` tag. It must **not**
- *   appear in `DefaultInfo.files`. A plain `bxl` does not reference
- *   it, so the runfiles staging is deferred. The runnable form is
- *   materialised only when something explicitly selects it — e.g.
- *   `bxl /f:tag='bxl-kind:binary'` (a `bazel run`-style target
- *   selection) or `bxl /f:value='<label>'` driven by a `bxl-run`
- *   wrapper that asks for `binaryInfo.runScript` directly.
+ *   appear in `DefaultInfo.files`. The exclusion filter above drops
+ *   the tagged pip; `bxl /f:tag='bxl-kind:binary'` (the `bazel run`
+ *   analog) — or `bxl /f:value='<label>'` driven by a `bxl-run`
+ *   wrapper that asks for `binaryInfo.runScript` directly — schedules
+ *   it. (Both `bazel run`-style and the bare `bxl` default pull in
+ *   the binary's build-time pip transitively, so the shim is always
+ *   wired to a real, built executable.)
  */
 @@public
 export interface BinaryInfo extends Provider {
@@ -382,8 +391,9 @@ export interface BinaryInfo extends Provider {
 
     /**
      * The compiled executable (bound). **Build-time** output —
-     * produced via `ctx.actions`; goes into `DefaultInfo.files`. A
-     * plain `bxl` build materialises this.
+     * produced via `ctx.actions`; goes into `DefaultInfo.files` so
+     * the exclusion-filtered build (and any positive filter that
+     * selects the target transitively) materialises it.
      */
     binary: Artifact;
 
@@ -393,8 +403,9 @@ export interface BinaryInfo extends Provider {
      * staging the binary needs. **Run-time** output — produced via
      * `ctx.runActions`; the underlying pip is tagged
      * `bxl-kind:binary` and is *not* listed in `DefaultInfo.files`.
-     * `bxl /f:tag='bxl-kind:binary'` (or anything that references the
-     * Artifact directly) schedules it; a plain `bxl` build does not.
+     * Selected by `bxl /f:tag='bxl-kind:binary'` (or anything that
+     * references the Artifact directly); dropped by the
+     * `bxl /f:~(tag='bxl-kind:binary')…` build filter.
      */
     runScript: Artifact;
 }

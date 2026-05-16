@@ -1,2 +1,3 @@
 # BuildXL output / cache
 Out/
+Tests/Exec/Out/

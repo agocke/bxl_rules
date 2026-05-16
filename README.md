@@ -477,16 +477,21 @@ const my_test = Rules.rule<MyAttrs, MyResolved, MyToolchain, MyResult>({
 
 `kind` is optional — omit it for the default "library" case, which gets no extra pip tag and no `ctx.runActions` adapter. The underlying tag vocabulary (`bxl-kind:test`, `bxl-kind:binary`) is intentionally **not** part of the public API: rule authors never write the string, and CI drivers only care about the filter spelling below.
 
-Once tagged, BuildXL's existing `/f:tag='...'` filter syntax does the rest:
+Once tagged, BuildXL's existing `/f:tag='...'` filter syntax does the rest. The tag is *selective* — `/f:tag='X'` builds pips matching `X` and **their transitive dependencies** (so selecting the run-tagged pip also schedules the build-time compile it depends on). The corollary: a plain `bxl` with no filter runs **every** scheduled pip; the `bazel build`-without-running analog needs an *exclusion* filter that drops the run-tagged pips.
 
-| Bazel                                              | bxl_rules                                                     |
-|----------------------------------------------------|---------------------------------------------------------------|
-| `bazel test //...`                                 | `bxl /f:tag='bxl-kind:test'` ¹                                |
-| `bazel test //... --test_tag_filters=-manual`      | `bxl /f:tag='bxl-kind:test'and(not(tag='manual'))`            |
-| `bazel run //target` (target selection only)       | `bxl /f:tag='bxl-kind:binary'` ¹                              |
-| `bazel build //...`                                | `bxl` (default top-level)                                     |
+| Bazel                                              | bxl_rules                                                                |
+|----------------------------------------------------|--------------------------------------------------------------------------|
+| `bazel test //...`                                 | `bxl /f:tag='bxl-kind:test'`                                             |
+| `bazel test //... --test_tag_filters=-manual`      | `bxl /f:tag='bxl-kind:test'and(not(tag='manual'))`                       |
+| `bazel run //target`                               | `bxl /f:tag='bxl-kind:binary'` ¹                                         |
+| `bazel build //...` (compile, don't run)           | `bxl /f:~(tag='bxl-kind:binary')and~(tag='bxl-kind:test')` ²             |
+| (no Bazel analog: build + run every pip)           | `bxl` (no filter — runs every pip, including test runners and run shims) |
 
-¹ Selection only — schedules the run-time pips for the chosen kind. Build-time compilation of every test / binary still happens via plain `bxl`; the kind filter additionally pulls in the *test runner* (or binary *runfiles-staging*) pip that the rule scheduled on `ctx.runActions`. See "Build-vs-run/test split" below.
+¹ Selects the run-tagged pip; BuildXL pulls in its transitive build dependencies, so the binary is compiled too — matching `bazel run`'s "build then run" semantics.
+
+² Excludes both run/test pips. The framework only attaches `bxl-kind:*` to pips scheduled via `ctx.runActions`, so this filter strictly drops the run-time half of the graph.
+
+The exclusion filter is verbose, but it can be encoded once in a wrapper script (or CI driver) so end users never type it directly. The underlying `bxl-kind:*` vocabulary itself is intentionally **not** part of the public rule-authoring API — rule authors get the split by declaring `kind:` on `Rules.rule({...})`; only filter callers see the strings.
 
 ### 2. Typed providers: `TestInfo` and `BinaryInfo`
 
@@ -542,14 +547,16 @@ There is intentionally **no** `LibraryInfo`. A library has no kind-specific meta
 
 `binary` and `test` rules each receive two `Actions` adapters on `RuleContext`:
 
-| Adapter           | Auto-tag                      | Goes in `DefaultInfo.files`?                                | Materialised by                                 |
-|-------------------|-------------------------------|-------------------------------------------------------------|-------------------------------------------------|
-| `ctx.actions`     | (none)                        | yes                                                         | `bxl` (plain build)                             |
-| `ctx.runActions`  | `bxl-kind:binary` / `…:test`  | **no** (expose via `BinaryInfo.runScript` / `TestInfo.stamp`+`runat`) | `bxl /f:tag='bxl-kind:binary'` / `…:test`       |
+| Adapter           | Auto-tag                      | Goes in `DefaultInfo.files`?                                | Selected by                                                |
+|-------------------|-------------------------------|-------------------------------------------------------------|------------------------------------------------------------|
+| `ctx.actions`     | (none)                        | yes                                                         | always — any filter that includes the target               |
+| `ctx.runActions`  | `bxl-kind:binary` / `…:test`  | **no** (expose via `BinaryInfo.runScript` / `TestInfo.stamp`+`runat`) | `bxl /f:tag='bxl-kind:binary'` / `…:test`, or any filter that doesn't exclude the tag |
 
 Both share the target's output directory and single-binding claim set, so a path claimed on one cannot be re-claimed on the other. `ctx.runActions` is `undefined` for library kinds (the default).
 
-This is the analog of Bazel's `bazel build` vs `bazel run` / `bazel test` distinction: a plain build compiles everything but never stages runfiles trees or invokes test runners, which can be a significant scheduling win on repos with many binaries and tests.
+The split is what enables Bazel-style filtering: `bazel test //...` ≡ `bxl /f:tag='bxl-kind:test'` (selects test runners, transitively pulls in test compiles); `bazel build //...` ≡ `bxl /f:~(tag='bxl-kind:binary')and~(tag='bxl-kind:test')` (compiles everything, runs nothing). **A plain `bxl` with no filter runs every pip**, including run-time pips — that's BuildXL's default-filter behaviour, not a deferral. Wrap the exclusion filter in a `bxl-build` shell alias / CI driver to get `bazel build`-like ergonomics.
+
+Execution-level coverage of this contract lives in `Tests/Exec/` and is driven by `./run-exec-tests.sh`. It scrubs `Out/`, runs `bxl` three times with the filters above, and asserts which of `build.txt` / `run.txt` actually materialised in each scenario.
 
 ### 3. `test_suite()` — JSON manifest aggregator
 
