@@ -26,7 +26,7 @@ jobs:
       - name: Set up .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 9.0.x
+          dotnet-version: 10.0.x
 
       - name: Install BuildXL bootstrap compiler (agtest.bxl.tool)
         run: dotnet tool install --global agtest.bxl.tool --version 0.2.0-ci.3.a5a8b51
