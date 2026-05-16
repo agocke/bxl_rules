@@ -443,6 +443,124 @@ const platformDeps = Rules.select(
 
 ---
 
+## Kinds: Library, Binary, and Test
+
+`bxl_rules` ships a small, cross-language contract so every language rule set (`bxl_rules_dotnet`, future `bxl_rules_*`) and every CI driver speaks the same vocabulary for "library", "binary", and "test". This is the Bazel `*_library` / `*_binary` / `*_test` distinction, ported to BuildXL.
+
+Three pieces, all in `Sdk.Rules`:
+
+### 1. The `bxl-kind:*` pip-tag namespace
+
+Kind-aware rules attach one of these tags to their primary pip via `ctx.actions.run({ tags: [...] })`:
+
+```typescript
+import * as Rules from "Sdk.Rules";
+
+// inside a *_test rule's impl
+ctx.actions.run({
+    tool: toolchain.runner,
+    arguments: [...],
+    outputs: [stamp, runat],
+    tags: [Rules.KindTags.test],          // "bxl-kind:test"
+});
+```
+
+Once tagged, BuildXL's existing `/f:tag='...'` filter syntax does the rest:
+
+| Bazel                                              | bxl_rules                                                     |
+|----------------------------------------------------|---------------------------------------------------------------|
+| `bazel test //...`                                 | `bxl /f:tag='bxl-kind:test'`                                  |
+| `bazel test //... --test_tag_filters=-manual`      | `bxl /f:tag='bxl-kind:test'and(not(tag='manual'))`            |
+| `bazel build //...`                                | `bxl` (default top-level)                                     |
+
+Use `Rules.KindTags.test` / `Rules.KindTags.binary` rather than inlining the string literal — the constant is the canonical spelling.
+
+### 2. Typed providers: `TestInfo` and `BinaryInfo`
+
+Every kind-aware rule returns one of these alongside its `DefaultInfo`:
+
+```typescript
+// *_test rule
+return {
+    kind: "DefaultInfo",
+    files: [Rules.getFile(stamp), Rules.getFile(runat)],
+    testInfo: Rules.testInfo({
+        name:       ctx.args.name,
+        stamp:      stamp,           // bound Artifact — empty success marker
+        runat:      runat,           // bound Artifact — captures `date +%s%N`
+        timeoutSec: 60,
+        tags:       ["long"],        // user tags ("manual", "flaky", ...)
+    }),
+};
+
+// *_binary rule
+return {
+    kind: "DefaultInfo",
+    files: [Rules.getFile(binary), Rules.getFile(runScript)],
+    binaryInfo: Rules.binaryInfo({
+        name:      ctx.args.name,
+        binary:    binary,
+        runScript: runScript,        // shim that picks the right runtime
+    }),
+};
+```
+
+Both providers carry `Artifact`s (not raw `File`s) so they compose with the rest of the SDK without leaking filesystem paths into BUILD code.
+
+There is intentionally **no** `LibraryInfo`. A library has no kind-specific metadata beyond its files, so `DefaultInfo` suffices.
+
+### 3. `test_suite()` — JSON manifest aggregator
+
+`Rules.test_suite({ name, tests })` aggregates `TestInfo[]` into a `<name>.tests.json` manifest pip. CI drivers read the manifest instead of grepping `BUILD.dsc` or globbing `*.test.stamp`:
+
+```typescript
+const fooTest = my_test({ name: "FooTest", ... });
+const barTest = my_test({ name: "BarTest", ... });
+
+@@public
+export const allTests = Rules.test_suite({
+    name: "all",
+    tests: [fooTest.testInfo, barTest.testInfo],
+});
+```
+
+`bxl /f:value='allTests'` schedules every test in the suite (the manifest's `defaultInfo` wires every stamp + runat in transitively).
+
+The manifest looks like:
+
+```json
+[
+  {"name":"FooTest","stamp":"/abs/.../FooTest.test.stamp",
+   "runat":"/abs/.../FooTest.test.runat","timeoutSec":60,"tags":[]},
+  {"name":"BarTest","stamp":"/abs/.../BarTest.test.stamp",
+   "runat":"/abs/.../BarTest.test.runat","timeoutSec":60,"tags":["long"]}
+]
+```
+
+### Cached-vs-executed in CI without parsing the XLG
+
+Each test runner is expected to write two outputs:
+
+- `<name>.test.stamp` — empty success marker.
+- `<name>.test.runat` — `date +%s%N` captured at the moment the pip body runs.
+
+BuildXL replays cached outputs byte-identically, so on a cache hit the `runat` file still contains the *original* execution timestamp. After a build, a CI driver does:
+
+```bash
+build_start_ns=$(date +%s%N)               # captured just before invoking bxl
+bxl ... /f:tag='bxl-kind:test'
+cached=0; executed=0
+for runat in $(jq -r '.[].runat' Out/.../all.tests.json); do
+    t=$(cat "$runat")
+    if (( t < build_start_ns )); then cached=$((cached+1)); else executed=$((executed+1)); fi
+done
+echo "Tests: $((cached + executed)) passed ($cached cached, $executed ran)"
+```
+
+This is a pure rules-layer convention — no engine support needed, and every language's test rule benefits from it.
+
+---
+
 ## Bazel Mapping
 
 If you know Bazel, here's the quick correspondence:
@@ -468,6 +586,9 @@ If you know Bazel, here's the quick correspondence:
 | `Configuration` (Bazel/Buck2 platform info) | `Configuration` |
 | `transition()` | `Transition` (value, not a string) |
 | `cfg = "exec"` (Bazel) / `cfg.exec` (Buck2) | `Rules.makeExecTransition({os, cpu})` (no singleton: workspaces declare their host vocabulary) |
+| `TestInfo`, `RunInfo` | `Rules.TestInfo`, `Rules.BinaryInfo` |
+| `test_suite()` | `Rules.test_suite({ name, tests })` |
+| `--test_tag_filters`, `bazel test //...` | `Rules.KindTags.test` + `/f:tag='bxl-kind:test'` |
 | `visibility = ["//visibility:public"]` | `@@public export` |
 | Starlark (Python-like) | DScript (TypeScript-like) |
 

@@ -249,6 +249,17 @@ export interface RunArgs {
 
     /** Working directory. If omitted, uses the target's output directory. */
     workingDirectory?: Directory;
+
+    /**
+     * Tags applied to the produced pip.
+     *
+     * Used to drive BuildXL's `/f:tag='...'` filter at the command line.
+     * Kind-aware rules should attach one of `Sdk.Rules.KindTags.*`
+     * (e.g. `KindTags.test` for a `*_test` rule's runner pip,
+     * `KindTags.binary` for a `*_binary` rule's launcher) in addition
+     * to any user-supplied tags.
+     */
+    tags?: string[];
 }
 
 // ============================================================================
@@ -543,6 +554,7 @@ function createActions(targetName: string): Actions {
                 environmentVariables: args.environmentVariables !== undefined
                     ? args.environmentVariables.map(e => ({name: e.name, value: e.value}))
                     : undefined,
+                tags: args.tags,
                 description: args.description || targetName
             });
 

@@ -36,6 +36,13 @@
  *   - copy_file           — copy a single Artifact
  *   - copy_files          — copy a set of Artifacts
  *
+ * Kind primitives (kinds.dsc):
+ *   - KindTags            — well-known pip-tag namespace
+ *                           (`bxl-kind:test`, `bxl-kind:binary`)
+ *   - TestInfo / testInfo — provider every `*_test` rule returns
+ *   - BinaryInfo / binaryInfo — provider every `*_binary` rule returns
+ *   - test_suite          — aggregator macro emitting a JSON manifest
+ *
  * Language-specific rules live in separate modules:
  *   - Sdk.Rules.CSharp    — csharp_library, csharp_binary, csharp_test
  */
