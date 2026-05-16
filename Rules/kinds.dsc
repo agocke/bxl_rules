@@ -23,16 +23,16 @@ import {Transformer} from "Sdk.Transformers";
  * contract uniform across `bxl_rules_dotnet`, `bxl_rules_<language>`,
  * and downstream CI tooling:
  *
- *   - `KindTags`     — the well-known pip-tag namespace
- *                      (`bxl-kind:test`, `bxl-kind:binary`) that every
- *                      kind-aware rule attaches to its primary pip via
- *                      `actions.run({ tags: [...] })`. Mapping to the
- *                      Bazel CLI:
+ *   - The `kind: "library" | "binary" | "test"` field on
+ *     `Rules.rule({...})` (declared in providers.dsc). Every pip an
+ *     impl schedules through `ctx.actions.run` is automatically tagged
+ *     with the framework-owned `bxl-kind:*` tag for that kind. Rule
+ *     authors do not see the tag string. Mapping to the Bazel CLI:
  *
- *                          bazel test //...
- *                            → bxl /f:tag='bxl-kind:test'
- *                          bazel build //...
- *                            → bxl   (default top-level)
+ *         bazel test //...
+ *           → bxl /f:tag='bxl-kind:test'
+ *         bazel build //...
+ *           → bxl   (default top-level)
  *
  *   - `TestInfo`     — typed provider every `*_test` rule returns
  *                      alongside `DefaultInfo`. Carries the stamp +
@@ -49,6 +49,12 @@ import {Transformer} from "Sdk.Transformers";
  *
  * Design notes
  * ------------
+ *  - The `bxl-kind:*` tag vocabulary is *not* public. It is applied by
+ *    the Actions adapter (see providers.dsc / `createActions`) using
+ *    the package-private `kindTagFor()` helper below. Rule authors
+ *    declare kind once on `Rules.rule({ kind: "test", ... })` and let
+ *    the framework do the tagging — this keeps the tag string an
+ *    implementation detail that can evolve without breaking callers.
  *  - Provider fields use `Artifact` (not raw `File`), in line with the
  *    rest of the rules SDK (see Rules/artifact.dsc). The stamp and
  *    runat outputs are produced by the test runner pip the rule author
@@ -75,32 +81,46 @@ import {Transformer} from "Sdk.Transformers";
  */
 
 // ============================================================================
-//  KindTags — well-known pip-tag namespace
+//  Package-private kind-tag vocabulary
 // ============================================================================
+
+/**
+ * The kind discriminator a rule author declares on `Rules.rule({...})`.
+ * Re-exported under this name from providers.dsc as the type of the
+ * `RuleDefinition.kind` field.
+ */
+@@public
+export type RuleKind = "library" | "binary" | "test";
 
 /**
  * Well-known pip-tag values for differentiating rule kinds.
  *
- * Rule authors apply these via `Actions.run({ tags: [KindTags.test] })`
- * (or via genrule's `tags:` field). CI drivers and interactive users
- * then select by kind using BuildXL's existing tag filter syntax:
- *
- *     bxl /f:tag='bxl-kind:test'                       # all tests
- *     bxl /f:tag='bxl-kind:binary'                     # all binaries
- *     bxl /f:tag='bxl-kind:test'and(not(tag='manual')) # tests, skipping manual
- *
- * The values are constants, not an enum, because BuildXL's filter
- * syntax takes raw strings. Treat them as the canonical spelling and
- * never inline the string literal at a call site.
+ * Intentionally **not** `@@public`: the tag vocabulary is an SDK
+ * implementation detail. The Actions adapter (createActions in
+ * providers.dsc) applies one of these to every pip a kind-aware rule
+ * schedules, using `kindTagFor()` below. CI drivers select by kind
+ * using BuildXL's existing tag filter syntax against the *string
+ * literal* — e.g. `bxl /f:tag='bxl-kind:test'` — never via this
+ * constant.
  */
-@@public
-export const KindTags = {
-    /** Tag applied to a `*_test` rule's primary runner pip. */
+const kindTags = {
     test: "bxl-kind:test",
-
-    /** Tag applied to a `*_binary` rule's launcher/shim pip. */
     binary: "bxl-kind:binary",
 };
+
+/**
+ * Map a declared `RuleKind` to the `bxl-kind:*` pip tag that the
+ * Actions adapter should auto-apply to every pip the rule schedules.
+ * Returns `undefined` for `"library"` (libraries are the default and
+ * carry no kind tag) and for `undefined` input.
+ *
+ * Package-private — called from providers.dsc / `createActions` only.
+ */
+export function kindTagFor(kind?: RuleKind): string {
+    if (kind === "test")   return kindTags.test;
+    if (kind === "binary") return kindTags.binary;
+    return undefined;
+}
 
 // ============================================================================
 //  TestInfo — provider returned by `*_test` rules
@@ -144,7 +164,9 @@ export interface TestInfo extends Provider {
     /**
      * User tags. Used by CI drivers for selection
      * (e.g. `"manual"`, `"long"`, `"flaky"`). These are *not* the same
-     * as the `bxl-kind:test` pip tag — see `KindTags`.
+     * as the framework-applied `bxl-kind:test` pip tag — the latter is
+     * attached automatically when the rule declares `kind: "test"` on
+     * `Rules.rule({...})`.
      */
     tags: string[];
 }
