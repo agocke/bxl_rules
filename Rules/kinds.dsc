@@ -127,12 +127,41 @@ export function kindTagFor(kind?: RuleKind): string {
 // ============================================================================
 
 /**
+ * Bazel-shaped t-shirt sizing for tests. Each size implies a default
+ * timeout wall clock and a rough resource bucket. An explicit
+ * `timeoutSec` on `testInfo(...)` always wins; otherwise the size's
+ * default is used; otherwise the implementation falls back to
+ * `medium` (300s).
+ *
+ * Defaults match Bazel:
+ *   small     →   60s
+ *   medium    →  300s   (5 min)
+ *   large     →  900s   (15 min)
+ *   enormous  → 3600s   (1 hour)
+ */
+@@public
+export type TestSize = "small" | "medium" | "large" | "enormous";
+
+/**
+ * Resolve a `TestSize` to its default timeout in seconds. Internal
+ * helper for the `testInfo` constructor.
+ */
+function defaultTimeoutForSize(size: TestSize): number {
+    if (size === "small")    return 60;
+    if (size === "medium")   return 300;
+    if (size === "large")    return 900;
+    if (size === "enormous") return 3600;
+    return 300;
+}
+
+/**
  * Typed provider every `*_test` rule should return alongside its
  * `DefaultInfo`. Lets generic infrastructure (the `test_suite` macro,
  * CI drivers, IDE integrations) discover tests without knowing the
  * specific rule type.
  *
- * Bazel equivalent: `TestInfo` (built-in).
+ * Bazel equivalent: `TestInfo` (built-in) plus the `size` / `timeout` /
+ * `flaky` attribute family from `*_test` rules.
  *
  * Both `stamp` and `runat` must be **bound** Artifacts produced by the
  * test runner pip. The runner writes an empty stamp on success and
@@ -158,29 +187,62 @@ export interface TestInfo extends Provider {
      */
     runat: Artifact;
 
-    /** Declared timeout in seconds. */
+    /**
+     * T-shirt size that drove the default timeout bucket. Optional —
+     * a test may carry just an explicit `timeoutSec` with no size, or
+     * neither (in which case the constructor falls back to "medium").
+     * Promoted to a first-class field (rather than a `tags[]` string)
+     * because CI dashboards and shard schedulers routinely group by
+     * size, and a typed value rules out `"smol"`-style typos.
+     */
+    size?: TestSize;
+
+    /**
+     * Wall-clock timeout in seconds. Always populated by the
+     * constructor — either explicit, derived from `size`, or the
+     * fallback "medium" default (300s).
+     */
     timeoutSec: number;
 
     /**
-     * User tags. Used by CI drivers for selection
-     * (e.g. `"manual"`, `"long"`, `"flaky"`). These are *not* the same
-     * as the framework-applied `bxl-kind:test` pip tag — the latter is
-     * attached automatically when the rule declares `kind: "test"` on
-     * `Rules.rule({...})`.
+     * Retry-on-failure policy intent. Optional; absent ≡ false. A
+     * language-specific test runner consumes this to decide whether
+     * to re-invoke the inner test process; the wrapping pip still
+     * produces a single stamp / runat pair regardless.
+     */
+    flaky?: boolean;
+
+    /**
+     * User tags. Used by CI drivers for selection (e.g. `"manual"`,
+     * `"exclusive"`, `"integration"`, `"smoke"`). These are *not* the
+     * same as the framework-applied `bxl-kind:test` pip tag — the
+     * latter is attached automatically when the rule declares
+     * `kind: "test"` on `Rules.rule({...})`.
+     *
+     * Bazel's well-known conventional tags (`"manual"`, `"exclusive"`,
+     * `"external"`, `"requires-network"`, ...) are intentionally not
+     * promoted to typed fields: they round-trip cleanly as strings,
+     * and BuildXL's `/f:tag='...'` filter matches them directly
+     * without a translation layer.
      */
     tags: string[];
 }
 
 /**
  * Convenience constructor for `TestInfo`. Sets the `kind` discriminator
- * so call sites don't repeat the literal.
+ * and resolves `timeoutSec` from `size` when not given explicitly.
+ *
+ * Timeout precedence: explicit `args.timeoutSec` > `args.size`'s
+ * default > `"medium"` default (300s).
  */
 @@public
 export function testInfo(args: {
     name: string,
     stamp: Artifact,
     runat: Artifact,
-    timeoutSec: number,
+    size?: TestSize,
+    timeoutSec?: number,
+    flaky?: boolean,
     tags?: string[],
 }): TestInfo {
     Contract.requires(args.stamp !== undefined, "testInfo: stamp must not be undefined");
@@ -189,12 +251,20 @@ export function testInfo(args: {
     Contract.requires(args.runat !== undefined, "testInfo: runat must not be undefined");
     Contract.requires(args.runat.kind !== "unbound",
         `testInfo: runat Artifact must be bound (kind !== "unbound"); got "${args.runat.kind}"`);
+
+    const resolvedTimeout =
+        args.timeoutSec !== undefined ? args.timeoutSec :
+        args.size       !== undefined ? defaultTimeoutForSize(args.size) :
+        /* fallback: */                 defaultTimeoutForSize("medium");
+
     return {
         kind: "TestInfo",
         name: args.name,
         stamp: args.stamp,
         runat: args.runat,
-        timeoutSec: args.timeoutSec,
+        size: args.size,
+        timeoutSec: resolvedTimeout,
+        flaky: args.flaky,
         tags: args.tags || [],
     };
 }
@@ -348,6 +418,10 @@ export function test_suite(args: TestSuiteArguments): TestSuiteResult {
  * Hand-rolled because DScript has no JSON.stringify and the schema is
  * fixed; we just need to escape any quotes/backslashes that show up in
  * names, tags, or stringified paths.
+ *
+ * `size` and `flaky` are omitted from the object when absent on the
+ * source `TestInfo` (rather than emitted as JSON `null`), so consumers
+ * can use simple presence checks.
  */
 function renderTestSuiteJson(tests: TestInfo[]): string {
     if (tests.length === 0) {
@@ -360,12 +434,16 @@ function renderTestSuiteJson(tests: TestInfo[]): string {
         const runatPath = getFile(t.runat).path.toDiagnosticString();
         const tagItems = t.tags.map(tg => `"${jsonEscape(tg)}"`);
         const tagsJson = `[${tagItems.join(",")}]`;
+        const sizeFragment  = t.size  !== undefined ? `,"size":"${jsonEscape(t.size)}"` : "";
+        const flakyFragment = t.flaky !== undefined ? `,"flaky":${t.flaky ? "true" : "false"}` : "";
         const entry =
             `{"name":"${jsonEscape(t.name)}",` +
             `"stamp":"${jsonEscape(stampPath)}",` +
             `"runat":"${jsonEscape(runatPath)}",` +
-            `"timeoutSec":${t.timeoutSec.toString()},` +
-            `"tags":${tagsJson}}`;
+            `"timeoutSec":${t.timeoutSec.toString()}` +
+            sizeFragment +
+            flakyFragment +
+            `,"tags":${tagsJson}}`;
         if (i === 0) {
             body = `  ${entry}`;
         } else {

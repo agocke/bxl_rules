@@ -249,17 +249,6 @@ export interface RunArgs {
 
     /** Working directory. If omitted, uses the target's output directory. */
     workingDirectory?: Directory;
-
-    /**
-     * Tags applied to the produced pip.
-     *
-     * Used to drive BuildXL's `/f:tag='...'` filter at the command line.
-     * Kind-aware rules should attach one of `Sdk.Rules.KindTags.*`
-     * (e.g. `KindTags.test` for a `*_test` rule's runner pip,
-     * `KindTags.binary` for a `*_binary` rule's launcher) in addition
-     * to any user-supplied tags.
-     */
-    tags?: string[];
 }
 
 // ============================================================================
@@ -341,6 +330,25 @@ export interface RuleDefinition<TAttrs, TResolved, TToolchain extends Toolchain,
      * Labels starting with `@` are resolved against this map.
      */
     externalPackages?: Map<string, StaticDirectory>;
+
+    /**
+     * Rule kind — drives framework behaviour, not exposed to callers.
+     *
+     *   "library" (default) — no kind tag; the catch-all.
+     *   "binary"            — every pip the impl schedules is tagged
+     *                         with the framework-owned `bxl-kind:binary`,
+     *                         so `bxl /f:tag='bxl-kind:binary'` picks
+     *                         the rule up (Bazel `bazel build` analog).
+     *   "test"              — every pip the impl schedules is tagged
+     *                         with `bxl-kind:test`, so
+     *                         `bxl /f:tag='bxl-kind:test'` picks it up
+     *                         (Bazel `bazel test //...` analog).
+     *
+     * The tag string itself is an SDK implementation detail (see
+     * `kindTagFor` in kinds.dsc); rule authors declare kind once here
+     * and the Actions adapter handles tagging.
+     */
+    kind?: RuleKind;
 }
 
 /**
@@ -368,7 +376,7 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
             resolveAll: (labels: Label[]) => resolveLabels(labels, currentDir, extPkgs).map(f => sourceArtifact(f))
         };
         const resolved = defn.resolve(args, resolver);
-        const actions = createActions(args.name);
+        const actions = createActions(args.name, defn.kind);
         return defn.impl({ args: resolved, toolchain: defn.toolchain, actions: actions });
     };
 }
@@ -512,9 +520,18 @@ export function select<T>(conditions: [string, T][], matches: (key: string) => b
  * the factory would let callers spin up siblings with the same target
  * name and quietly bypass the check.
  */
-function createActions(targetName: string): Actions {
+function createActions(targetName: string, ruleKind?: RuleKind): Actions {
     const targetDir = Context.getNewOutputDirectory(targetName);
     const claimedPaths = MutableSet.empty<string>();
+
+    // Framework-applied kind tag. Materialised once per Actions instance
+    // and attached to every pip the rule's impl schedules through
+    // `actions.run`, so downstream `bxl /f:tag='bxl-kind:test'` /
+    // `bxl-kind:binary` filters Just Work. `undefined` for kind ===
+    // "library" (or when no kind is declared); pip carries no kind tag
+    // in that case.
+    const kindTag = kindTagFor(ruleKind);
+    const autoTags = kindTag !== undefined ? [kindTag] : undefined;
 
     const claim = (a: Artifact, opName: string): Artifact => {
         Contract.requires(a !== undefined,
@@ -554,7 +571,7 @@ function createActions(targetName: string): Actions {
                 environmentVariables: args.environmentVariables !== undefined
                     ? args.environmentVariables.map(e => ({name: e.name, value: e.value}))
                     : undefined,
-                tags: args.tags,
+                tags: autoTags,
                 description: args.description || targetName
             });
 

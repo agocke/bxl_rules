@@ -449,21 +449,27 @@ const platformDeps = Rules.select(
 
 Three pieces, all in `Sdk.Rules`:
 
-### 1. The `bxl-kind:*` pip-tag namespace
+### 1. Declare the kind on `Rules.rule({...})`
 
-Kind-aware rules attach one of these tags to their primary pip via `ctx.actions.run({ tags: [...] })`:
+The rule author tells the framework what kind of thing they're defining; the Actions adapter handles tagging automatically:
 
 ```typescript
 import * as Rules from "Sdk.Rules";
 
-// inside a *_test rule's impl
-ctx.actions.run({
-    tool: toolchain.runner,
-    arguments: [...],
-    outputs: [stamp, runat],
-    tags: [Rules.KindTags.test],          // "bxl-kind:test"
+const my_test = Rules.rule<MyAttrs, MyResolved, MyToolchain, MyResult>({
+    kind: "test",          // "library" | "binary" | "test"
+    impl: (ctx) => {
+        // Every pip ctx.actions.run schedules from here gets
+        // tagged `bxl-kind:test` by the framework.
+        ctx.actions.run({ tool: tc.runner, arguments: [...], outputs: [stamp, runat] });
+        return { kind: "DefaultInfo", files: [...], testInfo: ... };
+    },
+    resolve: (attrs, _r) => attrs,
+    toolchain: noopToolchain,
 });
 ```
+
+`kind` is optional — omit it for the default "library" case, which gets no extra pip tag. The underlying tag vocabulary (`bxl-kind:test`, `bxl-kind:binary`) is intentionally **not** part of the public API: rule authors never write the string, and CI drivers only care about the filter spelling below.
 
 Once tagged, BuildXL's existing `/f:tag='...'` filter syntax does the rest:
 
@@ -473,11 +479,9 @@ Once tagged, BuildXL's existing `/f:tag='...'` filter syntax does the rest:
 | `bazel test //... --test_tag_filters=-manual`      | `bxl /f:tag='bxl-kind:test'and(not(tag='manual'))`            |
 | `bazel build //...`                                | `bxl` (default top-level)                                     |
 
-Use `Rules.KindTags.test` / `Rules.KindTags.binary` rather than inlining the string literal — the constant is the canonical spelling.
-
 ### 2. Typed providers: `TestInfo` and `BinaryInfo`
 
-Every kind-aware rule returns one of these alongside its `DefaultInfo`:
+Every kind-aware rule returns one of these alongside its `DefaultInfo`. `TestInfo` carries typed `size` and `flaky` fields (mirroring Bazel's `*_test` attribute family); `timeoutSec` is derived from `size` when not given explicitly.
 
 ```typescript
 // *_test rule
@@ -485,11 +489,12 @@ return {
     kind: "DefaultInfo",
     files: [Rules.getFile(stamp), Rules.getFile(runat)],
     testInfo: Rules.testInfo({
-        name:       ctx.args.name,
-        stamp:      stamp,           // bound Artifact — empty success marker
-        runat:      runat,           // bound Artifact — captures `date +%s%N`
-        timeoutSec: 60,
-        tags:       ["long"],        // user tags ("manual", "flaky", ...)
+        name:  ctx.args.name,
+        stamp: stamp,                // bound Artifact — empty success marker
+        runat: runat,                // bound Artifact — captures `date +%s%N`
+        size:  "small",              // → timeoutSec: 60 (medium=300, large=900, enormous=3600)
+        flaky: false,                // optional retry-on-failure intent
+        tags:  ["integration"],      // user tags ("manual", "exclusive", ...)
     }),
 };
 
@@ -505,7 +510,7 @@ return {
 };
 ```
 
-Both providers carry `Artifact`s (not raw `File`s) so they compose with the rest of the SDK without leaking filesystem paths into BUILD code.
+Timeout precedence: explicit `timeoutSec` > `size`'s default > `"medium"` default (300s). Both providers carry `Artifact`s (not raw `File`s) so they compose with the rest of the SDK without leaking filesystem paths into BUILD code.
 
 There is intentionally **no** `LibraryInfo`. A library has no kind-specific metadata beyond its files, so `DefaultInfo` suffices.
 
@@ -514,8 +519,8 @@ There is intentionally **no** `LibraryInfo`. A library has no kind-specific meta
 `Rules.test_suite({ name, tests })` aggregates `TestInfo[]` into a `<name>.tests.json` manifest pip. CI drivers read the manifest instead of grepping `BUILD.dsc` or globbing `*.test.stamp`:
 
 ```typescript
-const fooTest = my_test({ name: "FooTest", ... });
-const barTest = my_test({ name: "BarTest", ... });
+const fooTest = my_test({ name: "FooTest", size: "small" });
+const barTest = my_test({ name: "BarTest", size: "large", flaky: true });
 
 @@public
 export const allTests = Rules.test_suite({
@@ -531,11 +536,13 @@ The manifest looks like:
 ```json
 [
   {"name":"FooTest","stamp":"/abs/.../FooTest.test.stamp",
-   "runat":"/abs/.../FooTest.test.runat","timeoutSec":60,"tags":[]},
+   "runat":"/abs/.../FooTest.test.runat","timeoutSec":60,"size":"small","tags":[]},
   {"name":"BarTest","stamp":"/abs/.../BarTest.test.stamp",
-   "runat":"/abs/.../BarTest.test.runat","timeoutSec":60,"tags":["long"]}
+   "runat":"/abs/.../BarTest.test.runat","timeoutSec":900,"size":"large","flaky":true,"tags":[]}
 ]
 ```
+
+`size` and `flaky` are omitted from a manifest entry when not set on the source `TestInfo`.
 
 ### Cached-vs-executed in CI without parsing the XLG
 
@@ -588,7 +595,8 @@ If you know Bazel, here's the quick correspondence:
 | `cfg = "exec"` (Bazel) / `cfg.exec` (Buck2) | `Rules.makeExecTransition({os, cpu})` (no singleton: workspaces declare their host vocabulary) |
 | `TestInfo`, `RunInfo` | `Rules.TestInfo`, `Rules.BinaryInfo` |
 | `test_suite()` | `Rules.test_suite({ name, tests })` |
-| `--test_tag_filters`, `bazel test //...` | `Rules.KindTags.test` + `/f:tag='bxl-kind:test'` |
+| `*_test` / `*_binary` rule kind | `kind: "test"` / `kind: "binary"` on `Rules.rule({...})` (auto-applies the framework-internal `bxl-kind:*` pip tag; filter with `/f:tag='bxl-kind:test'`) |
+| `size = "small"` / `flaky = True` (Bazel test attrs) | `Rules.testInfo({ size: "small", flaky: true, ... })` (typed; `size` derives `timeoutSec`) |
 | `visibility = ["//visibility:public"]` | `@@public export` |
 | Starlark (Python-like) | DScript (TypeScript-like) |
 

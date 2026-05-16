@@ -3,18 +3,25 @@
 
 /**
  * Tests for Rules/kinds.dsc — the cross-language kind primitives
- * (KindTags, TestInfo / BinaryInfo, test_suite).
+ * (RuleKind on `rule()`, TestInfo / TestSize / BinaryInfo, test_suite).
  *
  * Same harness as the other Tests/*.dsc specs: each test returns "ok"
  * on success; a `Contract.assert` failure aborts evaluation and bxl
  * reports a non-zero exit code.
+ *
+ * The `bxl-kind:*` tag vocabulary is intentionally NOT public — we test
+ * the visible contract here (declare `kind: "test"` on rule(), get
+ * back a TestInfo provider with the documented fields) rather than
+ * asserting the specific tag string the framework attaches behind the
+ * scenes.
  */
 
 import * as Rules from "Sdk.Rules";
 
 // ----------------------------------------------------------------------------
-// Fixture: a no-op toolchain + a rule that schedules a fake test runner
-// pip producing the stamp / runat outputs and returns TestInfo.
+// Fixture: a no-op toolchain + a kind-aware test rule and binary rule.
+// Both declare `kind:` on `Rules.rule({...})`; the Actions adapter
+// auto-tags the scheduled pip with the matching `bxl-kind:*` tag.
 // ----------------------------------------------------------------------------
 
 const noopToolchain: Rules.Toolchain = {
@@ -24,7 +31,9 @@ const noopToolchain: Rules.Toolchain = {
 
 interface FakeTestAttrs {
     name: string;
+    size?: Rules.TestSize;
     timeoutSec?: number;
+    flaky?: boolean;
     tags?: string[];
 }
 
@@ -33,6 +42,7 @@ interface FakeTestResult extends Rules.DefaultInfo {
 }
 
 const fakeTest = Rules.rule<FakeTestAttrs, FakeTestAttrs, Rules.Toolchain, FakeTestResult>({
+    kind: "test",
     impl: (ctx) => {
         const stamp = ctx.actions.declareOutput(`${ctx.args.name}.test.stamp`);
         const runat = ctx.actions.declareOutput(`${ctx.args.name}.test.runat`);
@@ -42,7 +52,9 @@ const fakeTest = Rules.rule<FakeTestAttrs, FakeTestAttrs, Rules.Toolchain, FakeT
             name: ctx.args.name,
             stamp: boundStamp,
             runat: boundRunat,
-            timeoutSec: ctx.args.timeoutSec || 60,
+            size: ctx.args.size,
+            timeoutSec: ctx.args.timeoutSec,
+            flaky: ctx.args.flaky,
             tags: ctx.args.tags,
         });
         return {
@@ -64,6 +76,7 @@ interface FakeBinResult extends Rules.DefaultInfo {
 }
 
 const fakeBin = Rules.rule<FakeBinAttrs, FakeBinAttrs, Rules.Toolchain, FakeBinResult>({
+    kind: "binary",
     impl: (ctx) => {
         const bin   = ctx.actions.declareOutput(`${ctx.args.name}.exe`);
         const shim  = ctx.actions.declareOutput(`${ctx.args.name}.run.sh`);
@@ -84,18 +97,6 @@ const fakeBin = Rules.rule<FakeBinAttrs, FakeBinAttrs, Rules.Toolchain, FakeBinR
 });
 
 // ----------------------------------------------------------------------------
-// KindTags — well-known tag namespace
-// ----------------------------------------------------------------------------
-
-function test_kindTags_haveStableValues(): string {
-    Contract.assert(Rules.KindTags.test === "bxl-kind:test",
-        `KindTags.test must be "bxl-kind:test"; got "${Rules.KindTags.test}"`);
-    Contract.assert(Rules.KindTags.binary === "bxl-kind:binary",
-        `KindTags.binary must be "bxl-kind:binary"; got "${Rules.KindTags.binary}"`);
-    return "ok";
-}
-
-// ----------------------------------------------------------------------------
 // testInfo / binaryInfo constructors
 // ----------------------------------------------------------------------------
 
@@ -105,8 +106,13 @@ function test_testInfo_setsKindAndDefaults(): string {
         `testInfo.kind must be "TestInfo"; got "${r.testInfo.kind}"`);
     Contract.assert(r.testInfo.name === "kinds-t-defaults",
         "testInfo.name must mirror constructor name");
-    Contract.assert(r.testInfo.timeoutSec === 60,
-        `default timeout must be 60; got ${r.testInfo.timeoutSec}`);
+    // No size, no timeoutSec → fall back to "medium" default (300s).
+    Contract.assert(r.testInfo.timeoutSec === 300,
+        `default timeout (no size, no timeoutSec) must be 300; got ${r.testInfo.timeoutSec}`);
+    Contract.assert(r.testInfo.size === undefined,
+        `size must be undefined when not supplied; got "${r.testInfo.size}"`);
+    Contract.assert(r.testInfo.flaky === undefined,
+        `flaky must be undefined when not supplied; got "${r.testInfo.flaky}"`);
     Contract.assert(r.testInfo.tags.length === 0,
         "default tags must be empty");
     Contract.assert(r.testInfo.stamp.kind === "bound",
@@ -116,15 +122,57 @@ function test_testInfo_setsKindAndDefaults(): string {
     return "ok";
 }
 
+function test_testInfo_sizeDerivesTimeout(): string {
+    const small    = fakeTest({ name: "kinds-t-small",    size: "small"    });
+    const medium   = fakeTest({ name: "kinds-t-medium",   size: "medium"   });
+    const large    = fakeTest({ name: "kinds-t-large",    size: "large"    });
+    const enormous = fakeTest({ name: "kinds-t-enormous", size: "enormous" });
+
+    Contract.assert(small.testInfo.timeoutSec    === 60,
+        `size "small" must yield timeoutSec 60; got ${small.testInfo.timeoutSec}`);
+    Contract.assert(medium.testInfo.timeoutSec   === 300,
+        `size "medium" must yield timeoutSec 300; got ${medium.testInfo.timeoutSec}`);
+    Contract.assert(large.testInfo.timeoutSec    === 900,
+        `size "large" must yield timeoutSec 900; got ${large.testInfo.timeoutSec}`);
+    Contract.assert(enormous.testInfo.timeoutSec === 3600,
+        `size "enormous" must yield timeoutSec 3600; got ${enormous.testInfo.timeoutSec}`);
+
+    // size is preserved on the provider (typed, not encoded in tags).
+    Contract.assert(small.testInfo.size === "small",
+        `size must be preserved; got "${small.testInfo.size}"`);
+    return "ok";
+}
+
+function test_testInfo_explicitTimeoutOverridesSize(): string {
+    // Explicit timeoutSec wins over the size-derived default.
+    const r = fakeTest({ name: "kinds-t-override", size: "small", timeoutSec: 1234 });
+    Contract.assert(r.testInfo.timeoutSec === 1234,
+        `explicit timeoutSec must win over size default; got ${r.testInfo.timeoutSec}`);
+    Contract.assert(r.testInfo.size === "small",
+        "size must still be recorded even when timeout is overridden");
+    return "ok";
+}
+
+function test_testInfo_flakyIsRecorded(): string {
+    const flaky    = fakeTest({ name: "kinds-t-flaky",    flaky: true  });
+    const reliable = fakeTest({ name: "kinds-t-reliable", flaky: false });
+
+    Contract.assert(flaky.testInfo.flaky === true,
+        `flaky: true must be preserved; got "${flaky.testInfo.flaky}"`);
+    Contract.assert(reliable.testInfo.flaky === false,
+        `flaky: false must be preserved; got "${reliable.testInfo.flaky}"`);
+    return "ok";
+}
+
 function test_testInfo_preservesUserTags(): string {
-    const r = fakeTest({ name: "kinds-t-tags", timeoutSec: 30, tags: ["manual", "flaky"] });
+    const r = fakeTest({ name: "kinds-t-tags", timeoutSec: 30, tags: ["manual", "integration"] });
     Contract.assert(r.testInfo.timeoutSec === 30,
         "timeout must be preserved");
     Contract.assert(r.testInfo.tags.length === 2,
         `tags length must be 2; got ${r.testInfo.tags.length}`);
     Contract.assert(r.testInfo.tags[0] === "manual",
         "first user tag must be preserved");
-    Contract.assert(r.testInfo.tags[1] === "flaky",
+    Contract.assert(r.testInfo.tags[1] === "integration",
         "second user tag must be preserved");
     return "ok";
 }
@@ -158,8 +206,8 @@ function test_testSuite_emptyTests_yieldsManifestAlone(): string {
 }
 
 function test_testSuite_aggregatesStampAndRunatPerTest(): string {
-    const a = fakeTest({ name: "kinds-suite-a" });
-    const b = fakeTest({ name: "kinds-suite-b", tags: ["long"] });
+    const a = fakeTest({ name: "kinds-suite-a", size: "small", flaky: true });
+    const b = fakeTest({ name: "kinds-suite-b", tags: ["integration"] });
 
     const suite = Rules.test_suite({
         name: "kinds-suite-agg",
@@ -178,9 +226,11 @@ function test_testSuite_aggregatesStampAndRunatPerTest(): string {
 // Test exports — top-level evaluation runs each test exactly once.
 // ============================================================================
 
-@@public export const k01 = test_kindTags_haveStableValues();
-@@public export const k02 = test_testInfo_setsKindAndDefaults();
-@@public export const k03 = test_testInfo_preservesUserTags();
-@@public export const k04 = test_binaryInfo_setsKindAndArtifacts();
-@@public export const k05 = test_testSuite_emptyTests_yieldsManifestAlone();
-@@public export const k06 = test_testSuite_aggregatesStampAndRunatPerTest();
+@@public export const k01 = test_testInfo_setsKindAndDefaults();
+@@public export const k02 = test_testInfo_sizeDerivesTimeout();
+@@public export const k03 = test_testInfo_explicitTimeoutOverridesSize();
+@@public export const k04 = test_testInfo_flakyIsRecorded();
+@@public export const k05 = test_testInfo_preservesUserTags();
+@@public export const k06 = test_binaryInfo_setsKindAndArtifacts();
+@@public export const k07 = test_testSuite_emptyTests_yieldsManifestAlone();
+@@public export const k08 = test_testSuite_aggregatesStampAndRunatPerTest();
