@@ -229,8 +229,14 @@ export interface Actions {
  */
 @@public
 export interface RunArgs {
-    /** The executable to run. */
-    tool: File;
+    /**
+     * The executable to run. An `Artifact` — typically a
+     * `SourceArtifact` (toolchain-provided tool) or a bound output of
+     * an earlier action (a freshly-built tool). The adapter extracts
+     * the underlying `File` via `getFile()` before handing it to
+     * `Transformer.execute`.
+     */
+    tool: Artifact;
 
     /** Command-line arguments. Use Cmd helpers for output references. */
     arguments: Argument[];
@@ -278,8 +284,43 @@ export interface RuleContext<TResolved, TToolchain extends Toolchain> {
     /** The resolved toolchain instance. */
     toolchain: TToolchain;
 
-    /** Action helpers for declaring outputs and running processes. */
+    /**
+     * Action helpers for build-time outputs. Everything scheduled here
+     * is what `bxl` (a `bazel build //...` analog) materialises — the
+     * compiled assembly, generated headers, etc. Put the resulting
+     * Artifacts in `DefaultInfo.files`.
+     *
+     * Build-time pips are intentionally untagged regardless of kind,
+     * so a plain `bxl` build picks them up uniformly. Run-time pips
+     * (binary runfiles staging, test-runner invocation) live on the
+     * separate `runActions` adapter below.
+     */
     actions: Actions;
+
+    /**
+     * Action helpers for run-time outputs — present **only** for
+     * `kind: "binary"` and `kind: "test"`. Everything scheduled here
+     * is what a `bazel run` / `bazel test`-style selection
+     * materialises: for binaries, the invocation shim and runfiles
+     * tree staging; for tests, the runner pip that produces stamp +
+     * runat (plus any test-data staging). Pips scheduled through this
+     * adapter are automatically tagged with the matching `bxl-kind:*`
+     * value (`bxl-kind:binary` or `bxl-kind:test`).
+     *
+     * Crucially, the Artifacts produced here must **not** appear in
+     * `DefaultInfo.files`. They should be exposed only via the
+     * per-kind provider (`BinaryInfo.runScript`, `TestInfo.stamp`,
+     * `TestInfo.runat`). A plain `bxl` build then skips run-time work
+     * entirely; `bxl /f:tag='bxl-kind:binary'` or
+     * `bxl /f:tag='bxl-kind:test'` (or anything that references the
+     * run-time Artifacts directly) pulls them in along with the
+     * build-time outputs they depend on.
+     *
+     * Shares the target's output directory and single-binding claim
+     * set with `ctx.actions`, so the same path cannot be claimed
+     * twice across the two adapters.
+     */
+    runActions?: Actions;
 }
 
 // ============================================================================
@@ -337,6 +378,41 @@ export interface RuleDefinition<TAttrs, TResolved, TToolchain extends Toolchain,
      * Labels starting with `@` are resolved against this map.
      */
     externalPackages?: Map<string, StaticDirectory>;
+
+    /**
+     * Rule kind — drives framework behaviour, not exposed to callers.
+     *
+     *   "library" (default) — no kind tag; the catch-all. Bazel has no
+     *                         `bazel build`-equivalent kind verb because
+     *                         `bazel build` operates on every kind's
+     *                         default outputs uniformly; `bxl` works the
+     *                         same way.
+     *   "binary"            — every pip the impl schedules is tagged
+     *                         with the framework-owned `bxl-kind:binary`,
+     *                         so `bxl /f:tag='bxl-kind:binary'` selects
+     *                         the runnable executables (Bazel `bazel run`
+     *                         target-selection analog — selects, not yet
+     *                         executes).
+     *   "test"              — every pip the impl schedules is tagged
+     *                         with `bxl-kind:test`, so
+     *                         `bxl /f:tag='bxl-kind:test'` picks it up
+     *                         (Bazel `bazel test //...` analog).
+     *
+     * The tag string itself is an SDK implementation detail (see
+     * `kindTagFor` in kinds.dsc); rule authors declare kind once here
+     * and the Actions adapter handles tagging.
+     *
+     * Limitation (vs. Bazel): the Bazel `build` vs `run` split exists
+     * partly to defer runfiles staging until `run` is asked for. We do
+     * not yet model that. Today `BinaryInfo.runScript` is a regular
+     * Artifact, and binary rule authors typically include it in
+     * `DefaultInfo.files`, so a plain build already materialises
+     * runfiles. A future change would split a binary's outputs into a
+     * "build" set (just the executable) and a "run" set (shim +
+     * runfiles tree) and have the framework schedule the latter only
+     * when the binary kind is selected.
+     */
+    kind?: RuleKind;
 }
 
 /**
@@ -364,8 +440,13 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
             resolveAll: (labels: Label[]) => resolveLabels(labels, currentDir, extPkgs)
         };
         const resolved = defn.resolve(args, resolver);
-        const actions = createActions(args.name);
-        return defn.impl({ args: resolved, toolchain: defn.toolchain, actions: actions });
+        const rt = createActionsForRule(args.name, defn.kind);
+        return defn.impl({
+            args: resolved,
+            toolchain: defn.toolchain,
+            actions: rt.actions,
+            runActions: rt.runActions,
+        });
     };
 }
 
@@ -505,26 +586,74 @@ export function select<T>(conditions: [string, T][], matches: (key: string) => b
 // ============================================================================
 
 /**
+ * Per-rule bundle returned by `createActionsForRule` — the build-time
+ * Actions adapter plus, for binary and test kinds, a run-time Actions
+ * adapter. `runActions` is `undefined` for library kind / unspecified.
+ */
+interface RuleActions {
+    actions: Actions;
+    runActions?: Actions;
+}
+
+/**
+ * Build the per-rule Actions bundle for a `kind`. Centralises the
+ * kind→tag mapping (via `kindTagFor` / `runTagFor`) so the rest
+ * of providers.dsc never inspects `RuleKind` directly.
+ *
+ *   kind        | actions auto-tag | runActions
+ *   ------------|------------------|-----------------------------
+ *   "library"   | (none)           | (not provided)
+ *   undefined   | (none)           | (not provided)
+ *   "binary"    | (none)           | provided (auto-tag bxl-kind:binary)
+ *   "test"      | (none)           | provided (auto-tag bxl-kind:test)
+ *
+ * For binary and test kinds the two adapters share a single output
+ * directory and a single `claimedPaths` set, so an output path claimed
+ * via `ctx.actions` cannot be re-claimed via `ctx.runActions` (or
+ * vice versa).
+ */
+function createActionsForRule(targetName: string, kind?: RuleKind): RuleActions {
+    const targetDir = Context.getNewOutputDirectory(targetName);
+    const claimedPaths = MutableSet.empty<string>();
+
+    const buildTag = kindTagFor(kind);
+    const buildTags = buildTag !== undefined ? [buildTag] : undefined;
+    const actions = createActions(targetName, targetDir, claimedPaths, buildTags);
+
+    const runTag = runTagFor(kind);
+    if (runTag !== undefined) {
+        const runActions = createActions(targetName, targetDir, claimedPaths, [runTag]);
+        return { actions: actions, runActions: runActions };
+    }
+
+    return { actions: actions };
+}
+
+/**
  * Create an Actions instance scoped to a target name.
  *
- * All outputs are placed under a directory named after the target,
- * preventing collisions between targets. This is the implementation
- * backing `ctx.actions` in rule implementations.
+ * `targetDir` and `claimedPaths` are passed in (rather than allocated
+ * here) so a single rule can have multiple Actions adapters — see
+ * `createActionsForRule` above — that share the target's output
+ * directory and the single-binding claim set, while differing in the
+ * auto-applied pip tags.
  *
  * Output binding model: `declareOutput` returns an *unbound* Artifact;
  * `run` / `writeFile` / `copyFile` return *bound* Artifacts (carrying
  * the produced `DerivedFile`). Rule code passes the bound result
  * downstream when wiring deps.
  *
- * Not exported: each invocation owns its own `claimedPaths` set, so the
- * single-binding invariant lives in the rule-evaluation closure. Exposing
- * the factory would let callers spin up siblings with the same target
- * name and quietly bypass the check.
+ * Not exported: spawning siblings would let callers attach an
+ * arbitrary tag list to a rule's pips, bypassing the
+ * kind-driven tagging that the build-vs-run filter contract relies
+ * on. The sole entry point is `createActionsForRule`.
  */
-function createActions(targetName: string): Actions {
-    const targetDir = Context.getNewOutputDirectory(targetName);
-    const claimedPaths = MutableSet.empty<string>();
-
+function createActions(
+    targetName: string,
+    targetDir: Directory,
+    claimedPaths: MutableSet<string>,
+    autoTags?: string[]
+): Actions {
     const claim = (a: Artifact, opName: string): Artifact => {
         Contract.requires(a !== undefined,
             `${opName}: output Artifact must not be undefined`);
@@ -553,7 +682,7 @@ function createActions(targetName: string): Actions {
 
             const execResult = Transformer.execute({
                 tool: {
-                    exe: args.tool,
+                    exe: getFile(args.tool),
                     dependsOnCurrentHostOSDirectories: true
                 },
                 arguments: args.arguments,
@@ -563,6 +692,7 @@ function createActions(targetName: string): Actions {
                 environmentVariables: args.environmentVariables !== undefined
                     ? args.environmentVariables.map(e => ({name: e.name, value: e.value}))
                     : undefined,
+                tags: autoTags,
                 description: args.description || targetName
             });
 
@@ -571,7 +701,7 @@ function createActions(targetName: string): Actions {
 
         writeFile: (output: Artifact, lines: string[]): Artifact => {
             claim(output, "Actions.writeFile");
-            const f = Transformer.writeAllLines(output.path, lines);
+            const f = Transformer.writeAllLines(output.path, lines, autoTags);
             // SAFETY: BuildXL's Transformer.writeAllLines is typed `File` but in
             // practice always produces a DerivedFile (the pip output). DScript
             // casts are erased, so this cannot be runtime-validated; if BuildXL
@@ -583,7 +713,7 @@ function createActions(targetName: string): Actions {
         copyFile: (source: Artifact, dest: Artifact): Artifact => {
             claim(dest, "Actions.copyFile");
             const sourceFile = getFile(source);
-            const f = Transformer.copyFile(sourceFile, dest.path);
+            const f = Transformer.copyFile(sourceFile, dest.path, autoTags);
             // SAFETY: same as writeFile above — Transformer.copyFile is typed
             // `File` but always produces a DerivedFile in practice.
             return bindArtifact(dest, <DerivedFile>f);

@@ -36,6 +36,19 @@
  *   - copy_file           — copy a single Artifact
  *   - copy_files          — copy a set of Artifacts
  *
+ * Kind primitives (kinds.dsc):
+ *   - RuleKind            — `"library" | "binary" | "test"` (declare on
+ *                           `Rules.rule({ kind: ... })`; the Actions
+ *                           adapter auto-tags scheduled pips with the
+ *                           framework-internal `bxl-kind:*` vocabulary)
+ *   - TestInfo / testInfo — provider every `*_test` rule returns;
+ *                           carries typed `size?: TestSize` and
+ *                           `flaky?: boolean`, derives `timeoutSec`
+ *                           from `size` when not given explicitly
+ *   - TestSize            — `"small" | "medium" | "large" | "enormous"`
+ *   - BinaryInfo / binaryInfo — provider every `*_binary` rule returns
+ *   - test_suite          — aggregator macro emitting a JSON manifest
+ *
  * Language-specific rules live in separate modules:
  *   - Sdk.Rules.CSharp    — csharp_library, csharp_binary, csharp_test
  */

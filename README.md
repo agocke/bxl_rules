@@ -443,6 +443,175 @@ const platformDeps = Rules.select(
 
 ---
 
+## Kinds: Library, Binary, and Test
+
+`bxl_rules` ships a small, cross-language contract so every language rule set (`bxl_rules_dotnet`, future `bxl_rules_*`) and every CI driver speaks the same vocabulary for "library", "binary", and "test". This is the Bazel `*_library` / `*_binary` / `*_test` distinction, ported to BuildXL.
+
+Three pieces, all in `Sdk.Rules`:
+
+### 1. Declare the kind on `Rules.rule({...})`
+
+The rule author tells the framework what kind of thing they're defining; the Actions adapter handles tagging automatically:
+
+```typescript
+import * as Rules from "Sdk.Rules";
+
+const my_test = Rules.rule<MyAttrs, MyResolved, MyToolchain, MyResult>({
+    kind: "test",          // "library" | "binary" | "test"
+    impl: (ctx) => {
+        // Build-time: compile the test exe on ctx.actions (untagged;
+        // materialised by a plain `bxl` build, like `bazel build`).
+        const exe  = ctx.actions.declareOutput(`${ctx.args.name}.test.exe`);
+        const bExe = ctx.actions.run({ tool: tc.csc, arguments: [...], outputs: [exe] })[0];
+
+        // Run-time: invoke the runner on ctx.runActions (auto-tagged
+        // `bxl-kind:test`; only scheduled when explicitly requested).
+        ctx.runActions.run({ tool: tc.runner, arguments: [...], outputs: [stamp, runat] });
+
+        return { kind: "DefaultInfo", files: [Rules.getFile(bExe)], testInfo: ... };
+    },
+    resolve: (attrs, _r) => attrs,
+    toolchain: noopToolchain,
+});
+```
+
+`kind` is optional — omit it for the default "library" case, which gets no extra pip tag and no `ctx.runActions` adapter. The underlying tag vocabulary (`bxl-kind:test`, `bxl-kind:binary`) is intentionally **not** part of the public API: rule authors never write the string, and CI drivers only care about the filter spelling below.
+
+Once tagged, BuildXL's existing `/f:tag='...'` filter syntax does the rest. The tag is *selective* — `/f:tag='X'` builds pips matching `X` and **their transitive dependencies** (so selecting the run-tagged pip also schedules the build-time compile it depends on). The corollary: a plain `bxl` with no filter runs **every** scheduled pip; the `bazel build`-without-running analog needs an *exclusion* filter that drops the run-tagged pips.
+
+| Bazel                                              | bxl_rules                                                                |
+|----------------------------------------------------|--------------------------------------------------------------------------|
+| `bazel test //...`                                 | `bxl /f:tag='bxl-kind:test'`                                             |
+| `bazel test //... --test_tag_filters=-manual`      | `bxl /f:tag='bxl-kind:test'and(not(tag='manual'))`                       |
+| `bazel run //target`                               | `bxl /f:tag='bxl-kind:binary'` ¹                                         |
+| `bazel build //...` (compile, don't run)           | `bxl /f:~(tag='bxl-kind:binary')and~(tag='bxl-kind:test')` ²             |
+| (no Bazel analog: build + run every pip)           | `bxl` (no filter — runs every pip, including test runners and run shims) |
+
+¹ Selects the run-tagged pip; BuildXL pulls in its transitive build dependencies, so the binary is compiled too — matching `bazel run`'s "build then run" semantics.
+
+² Excludes both run/test pips. The framework only attaches `bxl-kind:*` to pips scheduled via `ctx.runActions`, so this filter strictly drops the run-time half of the graph.
+
+The exclusion filter is verbose, but it can be encoded once in a wrapper script (or CI driver) so end users never type it directly. The underlying `bxl-kind:*` vocabulary itself is intentionally **not** part of the public rule-authoring API — rule authors get the split by declaring `kind:` on `Rules.rule({...})`; only filter callers see the strings.
+
+### 2. Typed providers: `TestInfo` and `BinaryInfo`
+
+Every kind-aware rule returns one of these alongside its `DefaultInfo`. `TestInfo` carries typed `size` and `flaky` fields (mirroring Bazel's `*_test` attribute family); `timeoutSec` is derived from `size` when not given explicitly.
+
+```typescript
+// *_test rule — build-time compile + run-time runner on separate adapters
+const exe  = ctx.actions.declareOutput(`${name}.test.exe`);
+const bExe = ctx.actions.run({ tool: tc.csc, arguments: [...], outputs: [exe] })[0];
+
+const stamp = ctx.runActions.declareOutput(`${name}.test.stamp`);
+const runat = ctx.runActions.declareOutput(`${name}.test.runat`);
+ctx.runActions.run({ tool: tc.runner, arguments: [...], outputs: [stamp, runat] });
+
+return {
+    kind: "DefaultInfo",
+    files: [Rules.getFile(bExe)],            // ⚠ build-time only; no stamp/runat
+    testInfo: Rules.testInfo({
+        name:  ctx.args.name,
+        stamp: stamp,                        // bound Artifact — empty success marker (run-time)
+        runat: runat,                        // bound Artifact — captures `date +%s%N` (run-time)
+        size:  "small",                      // → timeoutSec: 60 (medium=300, large=900, enormous=3600)
+        flaky: false,                        // optional retry-on-failure intent
+        tags:  ["integration"],              // user tags ("manual", "exclusive", ...)
+    }),
+};
+
+// *_binary rule — same shape: compile on ctx.actions, runScript on ctx.runActions
+const bin  = ctx.actions.declareOutput(`${name}.dll`);
+const bBin = ctx.actions.run({ tool: tc.csc, arguments: [...], outputs: [bin] })[0];
+
+const shim  = ctx.runActions.declareOutput(`${name}.sh`);
+const bShim = ctx.runActions.writeFile(shim,
+    ["#!/bin/sh", `exec dotnet ${name}.dll "$@"`]);
+// (Stage native deps / runfiles tree on ctx.runActions too.)
+
+return {
+    kind: "DefaultInfo",
+    files: [Rules.getFile(bBin)],            // ⚠ build-time only; no runScript
+    binaryInfo: Rules.binaryInfo({
+        name:      ctx.args.name,
+        binary:    bBin,                     // build-time output
+        runScript: bShim,                    // run-time, deferred
+    }),
+};
+```
+
+Timeout precedence: explicit `timeoutSec` > `size`'s default > `"medium"` default (300s). Both providers carry `Artifact`s (not raw `File`s) so they compose with the rest of the SDK without leaking filesystem paths into BUILD code.
+
+There is intentionally **no** `LibraryInfo`. A library has no kind-specific metadata beyond its files, so `DefaultInfo` suffices.
+
+#### Build-vs-run/test split
+
+`binary` and `test` rules each receive two `Actions` adapters on `RuleContext`:
+
+| Adapter           | Auto-tag                      | Goes in `DefaultInfo.files`?                                | Selected by                                                |
+|-------------------|-------------------------------|-------------------------------------------------------------|------------------------------------------------------------|
+| `ctx.actions`     | (none)                        | yes                                                         | always — any filter that includes the target               |
+| `ctx.runActions`  | `bxl-kind:binary` / `…:test`  | **no** (expose via `BinaryInfo.runScript` / `TestInfo.stamp`+`runat`) | `bxl /f:tag='bxl-kind:binary'` / `…:test`, or any filter that doesn't exclude the tag |
+
+Both share the target's output directory and single-binding claim set, so a path claimed on one cannot be re-claimed on the other. `ctx.runActions` is `undefined` for library kinds (the default).
+
+The split is what enables Bazel-style filtering: `bazel test //...` ≡ `bxl /f:tag='bxl-kind:test'` (selects test runners, transitively pulls in test compiles); `bazel build //...` ≡ `bxl /f:~(tag='bxl-kind:binary')and~(tag='bxl-kind:test')` (compiles everything, runs nothing). **A plain `bxl` with no filter runs every pip**, including run-time pips — that's BuildXL's default-filter behaviour, not a deferral. Wrap the exclusion filter in a `bxl-build` shell alias / CI driver to get `bazel build`-like ergonomics.
+
+Execution-level coverage of this contract lives in `Tests/Exec/` and is driven by `./run-exec-tests.sh`. It scrubs `Out/`, runs `bxl` three times with the filters above, and asserts which of `build.txt` / `run.txt` actually materialised in each scenario.
+
+### 3. `test_suite()` — JSON manifest aggregator
+
+`Rules.test_suite({ name, tests })` aggregates `TestInfo[]` into a `<name>.tests.json` manifest pip. CI drivers read the manifest instead of grepping `BUILD.dsc` or globbing `*.test.stamp`:
+
+```typescript
+const fooTest = my_test({ name: "FooTest", size: "small" });
+const barTest = my_test({ name: "BarTest", size: "large", flaky: true });
+
+@@public
+export const allTests = Rules.test_suite({
+    name: "all",
+    tests: [fooTest.testInfo, barTest.testInfo],
+});
+```
+
+`bxl /f:value='allTests'` schedules every test in the suite (the manifest's `defaultInfo` wires every stamp + runat in transitively).
+
+The manifest looks like:
+
+```json
+[
+  {"name":"FooTest","stamp":"/abs/.../FooTest.test.stamp",
+   "runat":"/abs/.../FooTest.test.runat","timeoutSec":60,"size":"small","tags":[]},
+  {"name":"BarTest","stamp":"/abs/.../BarTest.test.stamp",
+   "runat":"/abs/.../BarTest.test.runat","timeoutSec":900,"size":"large","flaky":true,"tags":[]}
+]
+```
+
+`size` and `flaky` are omitted from a manifest entry when not set on the source `TestInfo`.
+
+### Cached-vs-executed in CI without parsing the XLG
+
+Each test runner is expected to write two outputs:
+
+- `<name>.test.stamp` — empty success marker.
+- `<name>.test.runat` — `date +%s%N` captured at the moment the pip body runs.
+
+BuildXL replays cached outputs byte-identically, so on a cache hit the `runat` file still contains the *original* execution timestamp. After a build, a CI driver does:
+
+```bash
+build_start_ns=$(date +%s%N)               # captured just before invoking bxl
+bxl ... /f:tag='bxl-kind:test'
+cached=0; executed=0
+for runat in $(jq -r '.[].runat' Out/.../all.tests.json); do
+    t=$(cat "$runat")
+    if (( t < build_start_ns )); then cached=$((cached+1)); else executed=$((executed+1)); fi
+done
+echo "Tests: $((cached + executed)) passed ($cached cached, $executed ran)"
+```
+
+This is a pure rules-layer convention — no engine support needed, and every language's test rule benefits from it.
+
+---
+
 ## Bazel Mapping
 
 If you know Bazel, here's the quick correspondence:
@@ -468,6 +637,10 @@ If you know Bazel, here's the quick correspondence:
 | `Configuration` (Bazel/Buck2 platform info) | `Configuration` |
 | `transition()` | `Transition` (value, not a string) |
 | `cfg = "exec"` (Bazel) / `cfg.exec` (Buck2) | `Rules.makeExecTransition({os, cpu})` (no singleton: workspaces declare their host vocabulary) |
+| `TestInfo`, `RunInfo` | `Rules.TestInfo`, `Rules.BinaryInfo` |
+| `test_suite()` | `Rules.test_suite({ name, tests })` |
+| `*_test` / `*_binary` rule kind | `kind: "test"` / `kind: "binary"` on `Rules.rule({...})` (provides `ctx.runActions`, which auto-applies the framework-internal `bxl-kind:*` pip tag to run-time pips; filter with `/f:tag='bxl-kind:test'`) |
+| `size = "small"` / `flaky = True` (Bazel test attrs) | `Rules.testInfo({ size: "small", flaky: true, ... })` (typed; `size` derives `timeoutSec`) |
 | `visibility = ["//visibility:public"]` | `@@public export` |
 | Starlark (Python-like) | DScript (TypeScript-like) |
 
