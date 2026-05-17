@@ -69,6 +69,80 @@ export function defaultInfo(args: {
     };
 }
 
+// ============================================================================
+//  FilesToRunInfo — an executable bundled with its runtime closure
+// ============================================================================
+
+/**
+ * Pairs an executable Artifact with the additional files/directories it
+ * needs at *runtime* (sibling shared libs the loader probes for, SDK
+ * subtrees the app shells out to, etc.).
+ *
+ * Modelled after Bazel's built-in `FilesToRunProvider`. In Bazel, when
+ * you pass a target's `FilesToRunProvider` to `ctx.actions.run(executable
+ * = …)`, Bazel automatically stages the target's runfiles tree as inputs
+ * — runfiles "travel with" the executable through this single provider.
+ *
+ * Same idea here: `Actions.run` accepts `tool: Artifact | FilesToRunInfo`.
+ * When given a `FilesToRunInfo`, the adapter unpacks `executable` for the
+ * process binary and merges `runfiles` into the pip's input dependencies.
+ *
+ * Typical use: toolchain providers store their tools as `FilesToRunInfo`,
+ * so that any runtime probing (e.g. the .NET apphost looking for
+ * `<dotnet-dir>/host/fxr/<ver>/libhostfxr.so` sibling files) is satisfied
+ * automatically wherever the tool is invoked.
+ */
+@@public
+export interface FilesToRunInfo extends Provider {
+    /** The executable to invoke. */
+    executable: Artifact;
+
+    /** Sibling files / sealed directories required at runtime. */
+    runfiles?: Artifact[];
+}
+
+/**
+ * Convenience constructor for FilesToRunInfo.
+ */
+@@public
+export function filesToRunInfo(args: {
+    executable: Artifact,
+    runfiles?: Artifact[],
+}): FilesToRunInfo {
+    return {
+        kind: "FilesToRunInfo",
+        executable: args.executable,
+        runfiles: args.runfiles,
+    };
+}
+
+/**
+ * Normalise a tool reference to a `FilesToRunInfo`. A bare `Artifact` is
+ * treated as `{ executable: tool, runfiles: [] }`; an existing
+ * `FilesToRunInfo` is returned unchanged.
+ */
+function asFilesToRun(tool: Artifact | FilesToRunInfo): FilesToRunInfo {
+    // Discriminate on the Provider `kind` tag.
+    if ((tool as FilesToRunInfo).kind === "FilesToRunInfo") {
+        return tool as FilesToRunInfo;
+    }
+    return { kind: "FilesToRunInfo", executable: tool as Artifact, runfiles: undefined };
+}
+
+/**
+ * Flatten a `FilesToRunInfo` into an `Artifact[]` suitable for use as
+ * `RunArgs.dependencies`. Returns `[executable, ...runfiles]`.
+ *
+ * Use this when an action uses a different tool (e.g. `/bin/sh`) but
+ * still needs the bundled executable and its runtime closure staged as
+ * inputs — e.g., a shim script that shells out to the dotnet host.
+ */
+@@public
+export function filesToRunDeps(info: FilesToRunInfo): Artifact[] {
+    const rf = info.runfiles || [];
+    return [info.executable, ...rf];
+}
+
 
 // ============================================================================
 //  Depset — transitive dependency accumulation
@@ -145,22 +219,6 @@ export function depsetAll<T extends Provider>(roots: T[], getDeps: (item: T) => 
 export interface Toolchain extends Provider {
     /** Human-readable name for log messages. */
     name: string;
-
-    /**
-     * Sibling files / sealed directories that must be staged alongside
-     * the toolchain's executables when their pips run — analogous to
-     * Bazel's `cc_toolchain.all_files` / `java_toolchain.tools`.
-     *
-     * Each entry is an `Artifact`; both file and directory sources are
-     * supported (see `sourceArtifact` / `sourceDirectoryArtifact`).
-     *
-     * The Actions adapter automatically forwards this list as
-     * dependencies on every `actions.run` call scoped to a rule whose
-     * toolchain is this one, so rule implementations never need to
-     * spell out runtime probes (e.g., the dotnet apphost's
-     * `<dotnet-dir>/host/fxr/<ver>/libhostfxr.so` lookup).
-     */
-    runfiles?: Artifact[];
 }
 
 // ============================================================================
@@ -246,13 +304,20 @@ export interface Actions {
 @@public
 export interface RunArgs {
     /**
-     * The executable to run. An `Artifact` — typically a
-     * `SourceArtifact` (toolchain-provided tool) or a bound output of
-     * an earlier action (a freshly-built tool). The adapter extracts
-     * the underlying `File` via `getFile()` before handing it to
-     * `Transformer.execute`.
+     * The executable to run.
+     *
+     * - A bare `Artifact` — typically a `SourceArtifact` (toolchain-
+     *   provided tool) or a bound output of an earlier action
+     *   (a freshly-built tool). Treated as having no extra runfiles.
+     * - A `FilesToRunInfo` — bundles the executable with sibling files
+     *   and sealed directories that must be staged alongside it at
+     *   runtime. The adapter merges those runfiles into the pip's input
+     *   dependencies automatically (Bazel `FilesToRunProvider` analog).
+     *
+     * The adapter extracts the underlying `File` from the executable
+     * via `getFile()` before handing it to `Transformer.execute`.
      */
-    tool: Artifact;
+    tool: Artifact | FilesToRunInfo;
 
     /** Command-line arguments. Use Cmd helpers for output references. */
     arguments: Argument[];
@@ -456,7 +521,7 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
             resolveAll: (labels: Label[]) => resolveLabels(labels, currentDir, extPkgs)
         };
         const resolved = defn.resolve(args, resolver);
-        const rt = createActionsForRule(args.name, defn.kind, defn.toolchain);
+        const rt = createActionsForRule(args.name, defn.kind);
         return defn.impl({
             args: resolved,
             toolchain: defn.toolchain,
@@ -628,17 +693,17 @@ interface RuleActions {
  * via `ctx.actions` cannot be re-claimed via `ctx.runActions` (or
  * vice versa).
  */
-function createActionsForRule(targetName: string, kind?: RuleKind, toolchain?: Toolchain): RuleActions {
+function createActionsForRule(targetName: string, kind?: RuleKind): RuleActions {
     const targetDir = Context.getNewOutputDirectory(targetName);
     const claimedPaths = MutableSet.empty<string>();
 
     const buildTag = kindTagFor(kind);
     const buildTags = buildTag !== undefined ? [buildTag] : undefined;
-    const actions = createActions(targetName, targetDir, claimedPaths, buildTags, toolchain);
+    const actions = createActions(targetName, targetDir, claimedPaths, buildTags);
 
     const runTag = runTagFor(kind);
     if (runTag !== undefined) {
-        const runActions = createActions(targetName, targetDir, claimedPaths, [runTag], toolchain);
+        const runActions = createActions(targetName, targetDir, claimedPaths, [runTag]);
         return { actions: actions, runActions: runActions };
     }
 
@@ -668,14 +733,8 @@ function createActions(
     targetName: string,
     targetDir: Directory,
     claimedPaths: MutableSet<string>,
-    autoTags?: string[],
-    toolchain?: Toolchain
+    autoTags?: string[]
 ): Actions {
-    const toolchainRunfiles: (File | StaticDirectory)[] = (toolchain && toolchain.runfiles)
-        ? toolchain.runfiles.map(a => getInputArtifact(a))
-        : [];
-
-
     const claim = (a: Artifact, opName: string): Artifact => {
         Contract.requires(a !== undefined,
             `${opName}: output Artifact must not be undefined`);
@@ -698,16 +757,19 @@ function createActions(
             const outputPaths = outputArts.map(a => a.path);
             const workDir = args.workingDirectory || targetDir;
 
+            const toolInfo = asFilesToRun(args.tool);
+            const toolRunfiles: (File | StaticDirectory)[] = toolInfo.runfiles !== undefined
+                ? toolInfo.runfiles.map(a => getInputArtifact(a))
+                : [];
             const depFiles: (File | StaticDirectory)[] = args.dependencies !== undefined
                 ? args.dependencies.map(a => getInputArtifact(a))
                 : [];
-
-            const allDeps: (File | StaticDirectory)[] = toolchainRunfiles
+            const allDeps: (File | StaticDirectory)[] = toolRunfiles
                 .reduce((acc, d) => acc.concat([d]), depFiles);
 
             const execResult = Transformer.execute({
                 tool: {
-                    exe: getFile(args.tool),
+                    exe: getFile(toolInfo.executable),
                     dependsOnCurrentHostOSDirectories: true
                 },
                 arguments: args.arguments,

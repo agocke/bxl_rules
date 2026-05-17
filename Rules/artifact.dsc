@@ -402,15 +402,16 @@ export function getDirectory(art: Artifact): StaticDirectory {
 }
 
 /**
- * Extract the underlying BuildXL input handle (`File` or
- * `StaticDirectory`) appropriate to feed to
- * `Transformer.execute({dependencies})`. Sources may be either; bound
- * outputs are always files.
+ * Internal bridge from `Artifact` to BuildXL's `InputArtifact` shape
+ * (`File | StaticDirectory`), used by the Actions adapter when
+ * building the `Transformer.execute({dependencies})` argument. Sources
+ * may be either kind; bound outputs are always files.
  *
- * Used by the Actions adapter to bridge `Artifact[]`-typed inputs into
- * BuildXL's `InputArtifact[]` parameter.
+ * Not exported: rule authors should reference inputs via
+ * `cmdInput(art)`. Punching this through to user code would leak the
+ * raw BuildXL handle that `path` / `getFile` are deliberately keeping
+ * inside the SDK.
  */
-@@public
 export function getInputArtifact(art: Artifact): File | StaticDirectory {
     Contract.requires(art !== undefined, "getInputArtifact: artifact must not be undefined");
     if (art.kind === "source") {
