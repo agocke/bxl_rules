@@ -145,6 +145,22 @@ export function depsetAll<T extends Provider>(roots: T[], getDeps: (item: T) => 
 export interface Toolchain extends Provider {
     /** Human-readable name for log messages. */
     name: string;
+
+    /**
+     * Sibling files / sealed directories that must be staged alongside
+     * the toolchain's executables when their pips run — analogous to
+     * Bazel's `cc_toolchain.all_files` / `java_toolchain.tools`.
+     *
+     * Each entry is an `Artifact`; both file and directory sources are
+     * supported (see `sourceArtifact` / `sourceDirectoryArtifact`).
+     *
+     * The Actions adapter automatically forwards this list as
+     * dependencies on every `actions.run` call scoped to a rule whose
+     * toolchain is this one, so rule implementations never need to
+     * spell out runtime probes (e.g., the dotnet apphost's
+     * `<dotnet-dir>/host/fxr/<ver>/libhostfxr.so` lookup).
+     */
+    runfiles?: Artifact[];
 }
 
 // ============================================================================
@@ -440,7 +456,7 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
             resolveAll: (labels: Label[]) => resolveLabels(labels, currentDir, extPkgs)
         };
         const resolved = defn.resolve(args, resolver);
-        const rt = createActionsForRule(args.name, defn.kind);
+        const rt = createActionsForRule(args.name, defn.kind, defn.toolchain);
         return defn.impl({
             args: resolved,
             toolchain: defn.toolchain,
@@ -612,17 +628,17 @@ interface RuleActions {
  * via `ctx.actions` cannot be re-claimed via `ctx.runActions` (or
  * vice versa).
  */
-function createActionsForRule(targetName: string, kind?: RuleKind): RuleActions {
+function createActionsForRule(targetName: string, kind?: RuleKind, toolchain?: Toolchain): RuleActions {
     const targetDir = Context.getNewOutputDirectory(targetName);
     const claimedPaths = MutableSet.empty<string>();
 
     const buildTag = kindTagFor(kind);
     const buildTags = buildTag !== undefined ? [buildTag] : undefined;
-    const actions = createActions(targetName, targetDir, claimedPaths, buildTags);
+    const actions = createActions(targetName, targetDir, claimedPaths, buildTags, toolchain);
 
     const runTag = runTagFor(kind);
     if (runTag !== undefined) {
-        const runActions = createActions(targetName, targetDir, claimedPaths, [runTag]);
+        const runActions = createActions(targetName, targetDir, claimedPaths, [runTag], toolchain);
         return { actions: actions, runActions: runActions };
     }
 
@@ -652,8 +668,14 @@ function createActions(
     targetName: string,
     targetDir: Directory,
     claimedPaths: MutableSet<string>,
-    autoTags?: string[]
+    autoTags?: string[],
+    toolchain?: Toolchain
 ): Actions {
+    const toolchainRunfiles: (File | StaticDirectory)[] = (toolchain && toolchain.runfiles)
+        ? toolchain.runfiles.map(a => getInputArtifact(a))
+        : [];
+
+
     const claim = (a: Artifact, opName: string): Artifact => {
         Contract.requires(a !== undefined,
             `${opName}: output Artifact must not be undefined`);
@@ -676,9 +698,12 @@ function createActions(
             const outputPaths = outputArts.map(a => a.path);
             const workDir = args.workingDirectory || targetDir;
 
-            const depFiles = args.dependencies !== undefined
-                ? args.dependencies.map(a => getFile(a))
-                : undefined;
+            const depFiles: (File | StaticDirectory)[] = args.dependencies !== undefined
+                ? args.dependencies.map(a => getInputArtifact(a))
+                : [];
+
+            const allDeps: (File | StaticDirectory)[] = toolchainRunfiles
+                .reduce((acc, d) => acc.concat([d]), depFiles);
 
             const execResult = Transformer.execute({
                 tool: {
@@ -688,7 +713,7 @@ function createActions(
                 arguments: args.arguments,
                 workingDirectory: workDir,
                 implicitOutputs: outputPaths,
-                dependencies: depFiles,
+                dependencies: allDeps.length > 0 ? allDeps : undefined,
                 environmentVariables: args.environmentVariables !== undefined
                     ? args.environmentVariables.map(e => ({name: e.name, value: e.value}))
                     : undefined,
