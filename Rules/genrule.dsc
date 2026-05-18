@@ -3,6 +3,118 @@
 
 import {Artifact as Tx, Cmd, Transformer} from "Sdk.Transformers";
 
+// ============================================================================
+//  native_test — run any executable as a test
+// ============================================================================
+
+/**
+ * Arguments for `native_test`.
+ *
+ * Analogous to Bazel's `native_test` / `sh_test`: wraps an arbitrary
+ * executable as a test target. The executable is invoked under
+ * `timeout`, and the pip is auto-tagged `bxl-kind:test` by the
+ * framework so `bxl /f:tag='bxl-kind:test'` selects it.
+ */
+@@public
+export interface NativeTestArguments {
+    /** Test name — used for output paths, diagnostics, and `TestInfo.name`. */
+    name: string;
+
+    /** The executable to run (source file or bound artifact from a prior action). */
+    src: Artifact;
+
+    /** Command-line arguments passed to the executable. */
+    args?: Argument[];
+
+    /**
+     * Data files the test needs at runtime. Staged (copied) into the
+     * test's output directory before running, ensuring co-location
+     * with the test process. Equivalent to Bazel's `data` attribute
+     * on test rules.
+     */
+    data?: Artifact[];
+
+    /** Environment variables. */
+    env?: {name: string, value: string}[];
+
+    /** Working directory for the test process. */
+    workingDirectory?: Directory;
+
+    /**
+     * Exit codes that indicate success. Default: `[0]`.
+     *
+     * CoreCLR standalone tests use exit code 100 for pass; set
+     * `successExitCodes: [100]` for those.
+     */
+    successExitCodes?: number[];
+
+    /** Wall-clock timeout in seconds. Default: 60. */
+    timeoutSec?: number;
+
+    /** T-shirt sizing — drives the default timeout when `timeoutSec` is not set. */
+    size?: TestSize;
+
+    /** Whether the test is known-flaky. */
+    flaky?: boolean;
+
+    /** User tags (e.g. `"manual"`, `"integration"`). */
+    tags?: string[];
+}
+
+@@public
+export interface NativeTestResult extends Provider {
+    testInfo: TestInfo;
+    defaultInfo: DefaultInfo;
+}
+
+const nativeTestToolchain: Toolchain = { kind: "Toolchain", name: "native-test" };
+
+/**
+ * Run an arbitrary executable as a test.
+ *
+ * Equivalent to Bazel's `native_test`: wraps any executable (a compiled
+ * binary, a shell script, corerun + DLL, etc.) as a test target with
+ * `TestInfo`. The test runner pip is scheduled via `ctx.runActions`
+ * (auto-tagged `bxl-kind:test`); `DefaultInfo.files` is empty so a
+ * plain `bxl` build compiles but does not execute the test.
+ *
+ * Usage:
+ *   const result = Rules.native_test({
+ *       name: "my_test",
+ *       src: Rules.sourceArtifact(f`test_binary`),
+ *       successExitCodes: [0],
+ *   });
+ */
+@@public
+export function native_test(args: NativeTestArguments): NativeTestResult {
+    const result = rule<NativeTestArguments, NativeTestArguments, Toolchain, NativeTestResult>({
+        doc: `native_test: ${args.name}`,
+        kind: "test",
+        toolchain: nativeTestToolchain,
+        resolve: (attrs, _resolver) => attrs,
+        impl: (ctx) => {
+            const ti = scheduleTestRunner(ctx.args.name, testRunInfo({
+                executable: ctx.args.src,
+                successExitCodes: ctx.args.successExitCodes,
+                env: ctx.args.env,
+                deps: ctx.args.data,
+                size: ctx.args.size,
+                timeoutSec: ctx.args.timeoutSec,
+                flaky: ctx.args.flaky,
+                tags: ctx.args.tags,
+            }), ctx.runActions);
+
+            return {
+                kind: "NativeTestResult",
+                testInfo: ti,
+                defaultInfo: defaultInfo({ files: [] }),
+            };
+        },
+    })(args);
+
+    return result;
+}
+
 /**
  * genrule — run an arbitrary command and capture its declared outputs.
  *
