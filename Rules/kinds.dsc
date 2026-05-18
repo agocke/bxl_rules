@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import {Transformer} from "Sdk.Transformers";
+import {Cmd, Transformer} from "Sdk.Transformers";
 
 /**
  * "Kinds" — first-class library / binary / test primitives.
@@ -350,6 +350,187 @@ export function testInfo(args: {
         flaky: args.flaky,
         tags: args.tags || [],
     };
+}
+
+// ============================================================================
+//  TestRunInfo — rule-facing test descriptor (framework generates runner)
+// ============================================================================
+
+/**
+ * Descriptor a `kind: "test"` rule returns to tell the framework
+ * **what** to run. The framework takes this and automatically:
+ *
+ *   1. Generates a runner script (timeout, stamp, runat capture)
+ *   2. Schedules the runner pip on `runActions` (auto-tagged `bxl-kind:test`)
+ *   3. Constructs a `TestInfo` provider with the produced stamp/runat
+ *
+ * This mirrors Bazel's model where a `test = True` rule returns `RunInfo`
+ * (the executable) and the framework handles everything else. Rule authors
+ * never write timeout/stamp/runat boilerplate.
+ *
+ * The `executable` field is the test script or binary to invoke. It will
+ * be `chmod +x`'d by the runner. `deps` are staged (copied) into the
+ * runner's output directory before execution.
+ */
+@@public
+export interface TestRunInfo extends Provider {
+    kind: "TestRunInfo";
+
+    /** The test executable (script or binary) to run. */
+    executable: Artifact;
+
+    /**
+     * Exit codes that indicate success. Default: `[0]`.
+     * CoreCLR tests use `[100]`.
+     */
+    successExitCodes?: number[];
+
+    /** Environment variables for the test process. */
+    env?: {name: string, value: string}[];
+
+    /**
+     * Data files staged into the runner's output directory before
+     * execution. The executable can reference them by leaf name
+     * relative to its own location.
+     */
+    deps?: Artifact[];
+
+    /** T-shirt sizing — drives the default timeout. */
+    size?: TestSize;
+
+    /** Explicit wall-clock timeout in seconds. */
+    timeoutSec?: number;
+
+    /** Whether the test is known-flaky. */
+    flaky?: boolean;
+
+    /** User tags. */
+    tags?: string[];
+}
+
+/**
+ * Convenience constructor for `TestRunInfo`.
+ */
+@@public
+export function testRunInfo(args: {
+    executable: Artifact,
+    successExitCodes?: number[],
+    env?: {name: string, value: string}[],
+    deps?: Artifact[],
+    size?: TestSize,
+    timeoutSec?: number,
+    flaky?: boolean,
+    tags?: string[],
+}): TestRunInfo {
+    Contract.requires(args.executable !== undefined,
+        "testRunInfo: executable must not be undefined");
+    return {
+        kind: "TestRunInfo",
+        executable: args.executable,
+        successExitCodes: args.successExitCodes,
+        env: args.env,
+        deps: args.deps,
+        size: args.size,
+        timeoutSec: args.timeoutSec,
+        flaky: args.flaky,
+        tags: args.tags,
+    };
+}
+
+const testRunnerBash = sourceArtifact(f`/bin/bash`);
+
+/**
+ * Schedule a test runner pip from a `TestRunInfo`.
+ *
+ * Call this from a `kind: "test"` rule's impl to let the framework
+ * handle test execution boilerplate (timeout, stamp, runat, exit-code
+ * checking). The rule provides `TestRunInfo` (what to run); this
+ * function handles how (generates the runner script, stages deps,
+ * schedules the pip on `runActions`).
+ *
+ * Returns a `TestInfo` provider with the produced stamp/runat artifacts.
+ */
+@@public
+export function scheduleTestRunner(
+    name: string,
+    runInfo: TestRunInfo,
+    runActions: Actions
+): TestInfo {
+    const timeoutSec =
+        runInfo.timeoutSec !== undefined ? runInfo.timeoutSec :
+        runInfo.size !== undefined ? defaultTimeoutForSize(runInfo.size) :
+        60;
+
+    const successCodes = runInfo.successExitCodes || [0];
+    const successCodesStr = successCodes.map(code => `${code}`);
+    const successChecks = successCodesStr
+        .map(code => `[[ "$exit_code" -eq ${code} ]]`)
+        .join(" || ");
+
+    // Stage the executable if it's a source artifact. If it's already
+    // bound (produced by an earlier action, e.g. writeFile on the same
+    // runActions), it's already in the output directory — skip the copy.
+    const stagedExe = runInfo.executable.kind === "source"
+        ? runActions.copyFile(
+            runInfo.executable,
+            runActions.declareOutput(runInfo.executable.path.name.toString()))
+        : runInfo.executable;
+
+    // Stage data deps alongside the executable.
+    const rawDeps: Artifact[] = runInfo.deps || [];
+    const stagedDeps: Artifact[] = rawDeps.map(a =>
+        runActions.copyFile(a, runActions.declareOutput(a.path.name.toString())));
+
+    const stamp = runActions.declareOutput(`${name}.test.stamp`);
+    const runat = runActions.declareOutput(`${name}.test.runat`);
+    const script = runActions.writeFile(
+        runActions.declareOutput(`${name}.test.sh`),
+        [
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            `date +%s%N > "$1"`,
+            "shift",
+            `stamp="$1"`,
+            "shift",
+            `chmod +x "$1"`,
+            "set +e",
+            `timeout --foreground --kill-after=10 ${timeoutSec} "$@"`,
+            "exit_code=$?",
+            "set -e",
+            `if ${successChecks}; then`,
+            `  printf 'passed\\n' > "$stamp"`,
+            "  exit 0",
+            "fi",
+            `if [[ "$exit_code" -eq 124 || "$exit_code" -eq 137 ]]; then`,
+            `  echo "Test timed out after ${timeoutSec}s" >&2`,
+            "fi",
+            `echo "Test failed with exit code $exit_code (expected: ${successCodesStr.join(", ")})" >&2`,
+            `exit "$exit_code"`,
+        ]);
+
+    const produced = runActions.run({
+        tool: testRunnerBash,
+        arguments: [
+            Cmd.argument(cmdInput(script)),
+            Cmd.argument(cmdOutput(runat)),
+            Cmd.argument(cmdOutput(stamp)),
+            Cmd.argument(cmdInput(stagedExe)),
+        ],
+        outputs: [stamp, runat],
+        dependencies: stagedDeps,
+        environmentVariables: runInfo.env,
+        description: `run test: ${name}`,
+    });
+
+    return testInfo({
+        name: name,
+        stamp: produced[0],
+        runat: produced[1],
+        size: runInfo.size,
+        timeoutSec: runInfo.timeoutSec,
+        flaky: runInfo.flaky,
+        tags: runInfo.tags,
+    });
 }
 
 // ============================================================================

@@ -32,6 +32,7 @@
  *
  * General-purpose rules (genrule.dsc):
  *   - genrule             — run any tool, declare outputs by name
+ *   - native_test         — run any executable as a test (Bazel `native_test`)
  *   - filegroup           — group SourceArtifacts under a logical name
  *   - copy_file           — copy a single Artifact
  *   - copy_files          — copy a set of Artifacts
