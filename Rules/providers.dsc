@@ -69,6 +69,90 @@ export function defaultInfo(args: {
     };
 }
 
+// ============================================================================
+//  ExecutableInfo — an executable bundled with its runtime closure
+// ============================================================================
+
+/**
+ * Pairs an executable Artifact with the additional files/directories it
+ * needs at *runtime* (sibling shared libs the loader probes for, SDK
+ * subtrees the app shells out to, etc.).
+ *
+ * Inspired by Bazel's executable-tool conventions, but structurally a
+ * merger of two Bazel concepts rather than a 1:1 mirror of either:
+ *
+ *   - `FilesToRunProvider.executable` — the binary File. (Bazel's
+ *     FilesToRunProvider also carries `runfiles_manifest` /
+ *     `repo_mapping_manifest`; we don't model those.)
+ *   - `DefaultInfo.default_runfiles.files` — the runfiles closure.
+ *
+ * Bazel keeps these on separate sister providers attached to the same
+ * Target, and `ctx.actions.run(executable = …)` auto-stages the matching
+ * runfiles via that target identity. We don't have a Target abstraction
+ * (toolchains carry tool references, not addressable targets), so the
+ * effect — "an executable plus the files it needs at runtime" — is
+ * captured in a single record.
+ *
+ * `Actions.run` accepts `tool: Artifact | ExecutableInfo`. When given an
+ * `ExecutableInfo`, the adapter unpacks `executable` for the process
+ * binary and merges `runfiles` into the pip's input dependencies.
+ *
+ * Typical use: toolchain providers store their tools as `ExecutableInfo`
+ * so that any runtime probing (e.g. the .NET apphost looking for
+ * `<dotnet-dir>/host/fxr/<ver>/libhostfxr.so` sibling files) is satisfied
+ * automatically wherever the tool is invoked.
+ */
+@@public
+export interface ExecutableInfo extends Provider {
+    /** The executable to invoke. */
+    executable: Artifact;
+
+    /** Sibling files / sealed directories required at runtime. */
+    runfiles?: Artifact[];
+}
+
+/**
+ * Convenience constructor for ExecutableInfo.
+ */
+@@public
+export function executableInfo(args: {
+    executable: Artifact,
+    runfiles?: Artifact[],
+}): ExecutableInfo {
+    return {
+        kind: "ExecutableInfo",
+        executable: args.executable,
+        runfiles: args.runfiles,
+    };
+}
+
+/**
+ * Normalise a tool reference to a `ExecutableInfo`. A bare `Artifact` is
+ * treated as `{ executable: tool, runfiles: [] }`; an existing
+ * `ExecutableInfo` is returned unchanged.
+ */
+function asExecutableInfo(tool: Artifact | ExecutableInfo): ExecutableInfo {
+    // Discriminate on the Provider `kind` tag.
+    if ((tool as ExecutableInfo).kind === "ExecutableInfo") {
+        return tool as ExecutableInfo;
+    }
+    return { kind: "ExecutableInfo", executable: tool as Artifact, runfiles: undefined };
+}
+
+/**
+ * Flatten a `ExecutableInfo` into an `Artifact[]` suitable for use as
+ * `RunArgs.dependencies`. Returns `[executable, ...runfiles]`.
+ *
+ * Use this when an action uses a different tool (e.g. `/bin/sh`) but
+ * still needs the bundled executable and its runtime closure staged as
+ * inputs — e.g., a shim script that shells out to the dotnet host.
+ */
+@@public
+export function executableDeps(info: ExecutableInfo): Artifact[] {
+    const rf = info.runfiles || [];
+    return [info.executable, ...rf];
+}
+
 
 // ============================================================================
 //  Depset — transitive dependency accumulation
@@ -230,13 +314,21 @@ export interface Actions {
 @@public
 export interface RunArgs {
     /**
-     * The executable to run. An `Artifact` — typically a
-     * `SourceArtifact` (toolchain-provided tool) or a bound output of
-     * an earlier action (a freshly-built tool). The adapter extracts
-     * the underlying `File` via `getFile()` before handing it to
-     * `Transformer.execute`.
+     * The executable to run.
+     *
+     * - A bare `Artifact` — typically a `SourceArtifact` (toolchain-
+     *   provided tool) or a bound output of an earlier action
+     *   (a freshly-built tool). Treated as having no extra runfiles.
+     * - An `ExecutableInfo` — bundles the executable with sibling files
+     *   and sealed directories that must be staged alongside it at
+     *   runtime. The adapter merges those runfiles into the pip's input
+     *   dependencies automatically (mirrors the effect of passing a
+     *   Bazel `FilesToRunProvider` to `ctx.actions.run(executable = …)`).
+     *
+     * The adapter extracts the underlying `File` from the executable
+     * via `getFile()` before handing it to `Transformer.execute`.
      */
-    tool: Artifact;
+    tool: Artifact | ExecutableInfo;
 
     /** Command-line arguments. Use Cmd helpers for output references. */
     arguments: Argument[];
@@ -676,19 +768,25 @@ function createActions(
             const outputPaths = outputArts.map(a => a.path);
             const workDir = args.workingDirectory || targetDir;
 
-            const depFiles = args.dependencies !== undefined
-                ? args.dependencies.map(a => getFile(a))
-                : undefined;
+            const toolInfo = asExecutableInfo(args.tool);
+            const toolRunfiles: (File | StaticDirectory)[] = toolInfo.runfiles !== undefined
+                ? toolInfo.runfiles.map(a => getInputArtifact(a))
+                : [];
+            const depFiles: (File | StaticDirectory)[] = args.dependencies !== undefined
+                ? args.dependencies.map(a => getInputArtifact(a))
+                : [];
+            const allDeps: (File | StaticDirectory)[] = toolRunfiles
+                .reduce((acc, d) => acc.concat([d]), depFiles);
 
             const execResult = Transformer.execute({
                 tool: {
-                    exe: getFile(args.tool),
+                    exe: getFile(toolInfo.executable),
                     dependsOnCurrentHostOSDirectories: true
                 },
                 arguments: args.arguments,
                 workingDirectory: workDir,
                 implicitOutputs: outputPaths,
-                dependencies: depFiles,
+                dependencies: allDeps.length > 0 ? allDeps : undefined,
                 environmentVariables: args.environmentVariables !== undefined
                     ? args.environmentVariables.map(e => ({name: e.name, value: e.value}))
                     : undefined,

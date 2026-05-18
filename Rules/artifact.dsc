@@ -169,14 +169,21 @@ export interface Artifact {
 }
 
 /**
- * An artifact that wraps an existing workspace source file.
+ * An artifact that wraps an existing workspace source — either a `File`
+ * or a sealed `StaticDirectory`.
  *
- * `SourceArtifact` extends `Artifact` with the bound `File` handle and
+ * `SourceArtifact` extends `Artifact` with the bound source handle and
  * its own brand. `kind` is narrowed to the single literal `"source"`;
  * this is the only Artifact subtype whose binding state is statically
  * known at the type level.
  *
- * Always construct via `sourceArtifact(file)`.
+ * Files vs directories are discriminated by the `isDirectory` flag —
+ * the same `is_directory` distinction Bazel models on a single
+ * `File`/`Artifact` type rather than parallel branded interfaces.
+ * Exactly one of `file` / `directory` is populated.
+ *
+ * Always construct via `sourceArtifact(file)` or
+ * `sourceDirectoryArtifact(dir)`.
  */
 @@public
 export interface SourceArtifact extends Artifact {
@@ -186,8 +193,14 @@ export interface SourceArtifact extends Artifact {
     /** Narrowed discriminator — always `"source"` for SourceArtifact. */
     kind: "source";
 
-    /** The bound source `File` this artifact wraps. */
-    file: File;
+    /** True iff this artifact wraps a directory rather than a file. */
+    isDirectory: boolean;
+
+    /** The bound source `File` (when `isDirectory === false`). */
+    file?: File;
+
+    /** The bound sealed `StaticDirectory` (when `isDirectory === true`). */
+    directory?: StaticDirectory;
 }
 
 // ============================================================================
@@ -262,7 +275,36 @@ export function sourceArtifact(file: File): SourceArtifact {
         kind: "source",
         path: fpath,
         boundFile: undefined,
+        isDirectory: false,
         file: file,
+        directory: undefined,
+    };
+}
+
+/**
+ * Wrap a workspace `StaticDirectory` as a `SourceArtifact` with
+ * `isDirectory === true`.
+ *
+ * Sealed/source directories entering the framework via attribute
+ * resolution (e.g., extracted SDK trees) are wrapped via this factory.
+ * Rule implementations should receive `Artifact` (or `SourceArtifact`),
+ * never raw `StaticDirectory`.
+ */
+@@public
+export function sourceDirectoryArtifact(dir: StaticDirectory): SourceArtifact {
+    const dpath = dir.root.path;
+    const short = dpath.name.toString();
+    return <SourceArtifact>{
+        __artifactBrand: undefined,
+        __sourceArtifactBrand: undefined,
+        shortPath: short,
+        extension: "",
+        kind: "source",
+        path: dpath,
+        boundFile: undefined,
+        isDirectory: true,
+        file: undefined,
+        directory: dir,
     };
 }
 
@@ -332,11 +374,51 @@ export function getFile(art: Artifact): File {
     Contract.requires(art.kind !== "unbound",
         "getFile: artifact is not bound (no producing action has been registered)");
     if (art.kind === "source") {
-        return (<SourceArtifact>art).file;
+        const src = <SourceArtifact>art;
+        Contract.requires(!src.isDirectory,
+            "getFile: source artifact wraps a directory; use getDirectory instead");
+        return src.file;
     }
     Contract.requires(art.boundFile !== undefined,
         "getFile: bound artifact missing boundFile (binding invariant violated)");
     return art.boundFile;
+}
+
+/**
+ * Extract the underlying `StaticDirectory` for a source directory artifact.
+ *
+ * Asserts `kind === "source"` and `isDirectory === true`. Output
+ * directories (opaque / shared-opaque) are not yet modelled.
+ */
+@@public
+export function getDirectory(art: Artifact): StaticDirectory {
+    Contract.requires(art !== undefined, "getDirectory: artifact must not be undefined");
+    Contract.requires(art.kind === "source",
+        `getDirectory: only source directory artifacts are supported; got kind "${art.kind}"`);
+    const src = <SourceArtifact>art;
+    Contract.requires(src.isDirectory,
+        "getDirectory: source artifact wraps a file; use getFile instead");
+    return src.directory;
+}
+
+/**
+ * Internal bridge from `Artifact` to BuildXL's `InputArtifact` shape
+ * (`File | StaticDirectory`), used by the Actions adapter when
+ * building the `Transformer.execute({dependencies})` argument. Sources
+ * may be either kind; bound outputs are always files.
+ *
+ * Not exported: rule authors should reference inputs via
+ * `cmdInput(art)`. Punching this through to user code would leak the
+ * raw BuildXL handle that `path` / `getFile` are deliberately keeping
+ * inside the SDK.
+ */
+export function getInputArtifact(art: Artifact): File | StaticDirectory {
+    Contract.requires(art !== undefined, "getInputArtifact: artifact must not be undefined");
+    if (art.kind === "source") {
+        const src = <SourceArtifact>art;
+        return src.isDirectory ? <File | StaticDirectory>src.directory : <File | StaticDirectory>src.file;
+    }
+    return <File | StaticDirectory>getFile(art);
 }
 
 // ============================================================================
