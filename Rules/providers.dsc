@@ -70,7 +70,7 @@ export function defaultInfo(args: {
 }
 
 // ============================================================================
-//  FilesToRunInfo — an executable bundled with its runtime closure
+//  ExecutableInfo — an executable bundled with its runtime closure
 // ============================================================================
 
 /**
@@ -78,22 +78,32 @@ export function defaultInfo(args: {
  * needs at *runtime* (sibling shared libs the loader probes for, SDK
  * subtrees the app shells out to, etc.).
  *
- * Modelled after Bazel's built-in `FilesToRunProvider`. In Bazel, when
- * you pass a target's `FilesToRunProvider` to `ctx.actions.run(executable
- * = …)`, Bazel automatically stages the target's runfiles tree as inputs
- * — runfiles "travel with" the executable through this single provider.
+ * Inspired by Bazel's executable-tool conventions, but structurally a
+ * merger of two Bazel concepts rather than a 1:1 mirror of either:
  *
- * Same idea here: `Actions.run` accepts `tool: Artifact | FilesToRunInfo`.
- * When given a `FilesToRunInfo`, the adapter unpacks `executable` for the
- * process binary and merges `runfiles` into the pip's input dependencies.
+ *   - `FilesToRunProvider.executable` — the binary File. (Bazel's
+ *     FilesToRunProvider also carries `runfiles_manifest` /
+ *     `repo_mapping_manifest`; we don't model those.)
+ *   - `DefaultInfo.default_runfiles.files` — the runfiles closure.
  *
- * Typical use: toolchain providers store their tools as `FilesToRunInfo`,
+ * Bazel keeps these on separate sister providers attached to the same
+ * Target, and `ctx.actions.run(executable = …)` auto-stages the matching
+ * runfiles via that target identity. We don't have a Target abstraction
+ * (toolchains carry tool references, not addressable targets), so the
+ * effect — "an executable plus the files it needs at runtime" — is
+ * captured in a single record.
+ *
+ * `Actions.run` accepts `tool: Artifact | ExecutableInfo`. When given an
+ * `ExecutableInfo`, the adapter unpacks `executable` for the process
+ * binary and merges `runfiles` into the pip's input dependencies.
+ *
+ * Typical use: toolchain providers store their tools as `ExecutableInfo`
  * so that any runtime probing (e.g. the .NET apphost looking for
  * `<dotnet-dir>/host/fxr/<ver>/libhostfxr.so` sibling files) is satisfied
  * automatically wherever the tool is invoked.
  */
 @@public
-export interface FilesToRunInfo extends Provider {
+export interface ExecutableInfo extends Provider {
     /** The executable to invoke. */
     executable: Artifact;
 
@@ -102,35 +112,35 @@ export interface FilesToRunInfo extends Provider {
 }
 
 /**
- * Convenience constructor for FilesToRunInfo.
+ * Convenience constructor for ExecutableInfo.
  */
 @@public
-export function filesToRunInfo(args: {
+export function executableInfo(args: {
     executable: Artifact,
     runfiles?: Artifact[],
-}): FilesToRunInfo {
+}): ExecutableInfo {
     return {
-        kind: "FilesToRunInfo",
+        kind: "ExecutableInfo",
         executable: args.executable,
         runfiles: args.runfiles,
     };
 }
 
 /**
- * Normalise a tool reference to a `FilesToRunInfo`. A bare `Artifact` is
+ * Normalise a tool reference to a `ExecutableInfo`. A bare `Artifact` is
  * treated as `{ executable: tool, runfiles: [] }`; an existing
- * `FilesToRunInfo` is returned unchanged.
+ * `ExecutableInfo` is returned unchanged.
  */
-function asFilesToRun(tool: Artifact | FilesToRunInfo): FilesToRunInfo {
+function asExecutableInfo(tool: Artifact | ExecutableInfo): ExecutableInfo {
     // Discriminate on the Provider `kind` tag.
-    if ((tool as FilesToRunInfo).kind === "FilesToRunInfo") {
-        return tool as FilesToRunInfo;
+    if ((tool as ExecutableInfo).kind === "ExecutableInfo") {
+        return tool as ExecutableInfo;
     }
-    return { kind: "FilesToRunInfo", executable: tool as Artifact, runfiles: undefined };
+    return { kind: "ExecutableInfo", executable: tool as Artifact, runfiles: undefined };
 }
 
 /**
- * Flatten a `FilesToRunInfo` into an `Artifact[]` suitable for use as
+ * Flatten a `ExecutableInfo` into an `Artifact[]` suitable for use as
  * `RunArgs.dependencies`. Returns `[executable, ...runfiles]`.
  *
  * Use this when an action uses a different tool (e.g. `/bin/sh`) but
@@ -138,7 +148,7 @@ function asFilesToRun(tool: Artifact | FilesToRunInfo): FilesToRunInfo {
  * inputs — e.g., a shim script that shells out to the dotnet host.
  */
 @@public
-export function filesToRunDeps(info: FilesToRunInfo): Artifact[] {
+export function executableDeps(info: ExecutableInfo): Artifact[] {
     const rf = info.runfiles || [];
     return [info.executable, ...rf];
 }
@@ -309,15 +319,16 @@ export interface RunArgs {
      * - A bare `Artifact` — typically a `SourceArtifact` (toolchain-
      *   provided tool) or a bound output of an earlier action
      *   (a freshly-built tool). Treated as having no extra runfiles.
-     * - A `FilesToRunInfo` — bundles the executable with sibling files
+     * - An `ExecutableInfo` — bundles the executable with sibling files
      *   and sealed directories that must be staged alongside it at
      *   runtime. The adapter merges those runfiles into the pip's input
-     *   dependencies automatically (Bazel `FilesToRunProvider` analog).
+     *   dependencies automatically (mirrors the effect of passing a
+     *   Bazel `FilesToRunProvider` to `ctx.actions.run(executable = …)`).
      *
      * The adapter extracts the underlying `File` from the executable
      * via `getFile()` before handing it to `Transformer.execute`.
      */
-    tool: Artifact | FilesToRunInfo;
+    tool: Artifact | ExecutableInfo;
 
     /** Command-line arguments. Use Cmd helpers for output references. */
     arguments: Argument[];
@@ -757,7 +768,7 @@ function createActions(
             const outputPaths = outputArts.map(a => a.path);
             const workDir = args.workingDirectory || targetDir;
 
-            const toolInfo = asFilesToRun(args.tool);
+            const toolInfo = asExecutableInfo(args.tool);
             const toolRunfiles: (File | StaticDirectory)[] = toolInfo.runfiles !== undefined
                 ? toolInfo.runfiles.map(a => getInputArtifact(a))
                 : [];
