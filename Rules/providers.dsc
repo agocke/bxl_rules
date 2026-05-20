@@ -304,6 +304,19 @@ export interface Actions {
 }
 
 /**
+ * An environment variable to set for `actions.run()`.
+ *
+ * Values may be plain strings or DScript path types. Path-typed values
+ * are forwarded directly to `Transformer.execute`, which lets BuildXL
+ * track and remap them across machines.
+ */
+@@public
+export interface EnvironmentVariable {
+    name: string;
+    value: string | Path | Directory | File;
+}
+
+/**
  * Arguments to `actions.run()`.
  *
  * `outputs` are unbound `Artifact`s produced by `declareOutput`. Each
@@ -339,8 +352,15 @@ export interface RunArgs {
     /** Additional input dependencies (beyond those in arguments). */
     dependencies?: Artifact[];
 
-    /** Environment variables. */
-    environmentVariables?: {name: string, value: string}[];
+    /**
+     * Environment variables.
+     *
+     * Values may be plain strings or DScript path types (`Directory`,
+     * `Path`, `File`).  Path-typed values are forwarded to
+     * `Transformer.execute` as-is, so BuildXL can track them and
+     * remap them across machines when caching is enabled.
+     */
+    environmentVariables?: EnvironmentVariable[];
 
     /** Description for build logs. */
     description?: string;
