@@ -67,8 +67,6 @@ export interface NativeTestResult extends Provider {
     defaultInfo: DefaultInfo;
 }
 
-const nativeTestToolchain: Toolchain = { kind: "Toolchain", name: "native-test" };
-
 /**
  * Run an arbitrary executable as a test.
  *
@@ -90,7 +88,6 @@ export function native_test(args: NativeTestArguments): NativeTestResult {
     const result = rule<NativeTestArguments, NativeTestArguments, Toolchain, NativeTestResult>({
         doc: `native_test: ${args.name}`,
         kind: "test",
-        toolchain: nativeTestToolchain,
         resolve: (attrs, _resolver) => attrs,
         impl: (ctx) => {
             const ti = scheduleTestRunner(ctx.args.name, testRunInfo({

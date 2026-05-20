@@ -373,8 +373,11 @@ export interface RuleContext<TResolved, TToolchain extends Toolchain> {
      */
     args: TResolved;
 
-    /** The resolved toolchain instance. */
-    toolchain: TToolchain;
+    /**
+     * The resolved toolchain instance.
+     * Undefined when the rule definition omits the toolchain.
+     */
+    toolchain?: TToolchain;
 
     /**
      * Action helpers for build-time outputs. Everything scheduled here
@@ -459,8 +462,12 @@ export interface RuleDefinition<TAttrs, TResolved, TToolchain extends Toolchain,
     /** Documentation string. */
     doc?: string;
 
-    /** The toolchain instance to use. */
-    toolchain: TToolchain;
+    /**
+     * The toolchain instance to use. Optional — omit for rules that
+     * don't need external tools (e.g. write_file, copy_file).
+     * When omitted, `ctx.toolchain` receives a default no-op Toolchain.
+     */
+    toolchain?: TToolchain;
 
     /**
      * External packages available for `@pkg//path:file` label resolution.
