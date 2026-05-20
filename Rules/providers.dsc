@@ -347,6 +347,40 @@ export interface RunArgs {
 
     /** Working directory. If omitted, uses the target's output directory. */
     workingDirectory?: Directory;
+
+    /**
+     * Sandbox relaxation options forwarded to `Transformer.execute`'s
+     * `unsafe` bag.
+     *
+     * Use sparingly — these weaken BuildXL's sandboxing guarantees.
+     * The primary use case is enabling shared compilation (compiler
+     * server), which requires breaking the compiler service process
+     * out of the sandbox and trusting statically declared accesses.
+     */
+    sandboxRelaxation?: SandboxRelaxation;
+}
+
+/**
+ * Subset of `Transformer.ExecuteArguments.unsafe` sandbox options
+ * that `actions.run` is willing to forward.
+ */
+@@public
+export interface SandboxRelaxation {
+    /**
+     * Process names that will break away from the sandbox when
+     * spawned by the main process. Accesses of breakaway processes
+     * are not observed; they can outlive the pip.
+     */
+    childProcessesToBreakawayFromSandbox?: PathAtom[];
+
+    /**
+     * When true, all statically declared inputs and outputs are
+     * added to the sandbox access report as if the process actually
+     * accessed them. Compensates for unobserved accesses from
+     * breakaway children. Only effective when
+     * `childProcessesToBreakawayFromSandbox` is non-empty.
+     */
+    trustStaticallyDeclaredAccesses?: boolean;
 }
 
 // ============================================================================
@@ -785,10 +819,18 @@ function createActions(
             const allDeps: (File | StaticDirectory)[] = toolRunfiles
                 .reduce((acc, d) => acc.concat([d]), depFiles);
 
+            // When trustStaticallyDeclaredAccesses is set (shared compilation),
+            // dependsOnCurrentHostOSDirectories must be false — the engine
+            // creates sealed source directories that are incompatible with
+            // trusted-access pips.
+            const hasBreakaway = args.sandboxRelaxation !== undefined
+                && args.sandboxRelaxation.childProcessesToBreakawayFromSandbox !== undefined
+                && args.sandboxRelaxation.childProcessesToBreakawayFromSandbox.length > 0;
+
             const execResult = Transformer.execute({
                 tool: {
                     exe: getFile(toolInfo.executable),
-                    dependsOnCurrentHostOSDirectories: true
+                    dependsOnCurrentHostOSDirectories: !hasBreakaway
                 },
                 arguments: args.arguments,
                 workingDirectory: workDir,
@@ -797,6 +839,7 @@ function createActions(
                 environmentVariables: args.environmentVariables !== undefined
                     ? args.environmentVariables.map(e => ({name: e.name, value: e.value}))
                     : undefined,
+                unsafe: args.sandboxRelaxation,
                 tags: autoTags,
                 description: args.description || targetName
             });
