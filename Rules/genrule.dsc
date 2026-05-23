@@ -274,7 +274,7 @@ export function genrule(args: GenruleArguments): GenruleResult {
     return {
         executeResult: executeResult,
         outs: boundOuts,
-        defaultInfo: defaultInfo({ files: boundOuts.map(a => getFile(a)) }),
+        defaultInfo: defaultInfo({ files: boundOuts }),
     };
 }
 
@@ -310,7 +310,7 @@ export interface FilegroupResult {
 export function filegroup(args: FilegroupArguments): FilegroupResult {
     return {
         srcs: args.srcs,
-        defaultInfo: defaultInfo({ files: args.srcs.map(s => s.file) }),
+        defaultInfo: defaultInfo({ files: args.srcs.map(s => <Artifact>s) }),
     };
 }
 
@@ -374,4 +374,3 @@ export function copy_files(args: CopyFilesArguments): Artifact[] {
         return bindArtifact(declared, <DerivedFile>f);
     });
 }
-

@@ -209,7 +209,7 @@ To unwrap to `File`, use `Rules.getFile(art)`.
 There's no enforced change — providers can carry whatever fields they like. Two soft conventions to consider:
 
 - For outputs that downstream rules will inject into `cmdInput`, prefer carrying `Artifact` (so the consumer can pass straight to `cmdInput` without unwrapping). For outputs consumed only by code that then writes them to disk (logs, manifests), `File` is fine.
-- `defaultInfo({ files: [...] })` still takes `File[]`, so use `Rules.getFile(art)` when populating it from bound Artifacts.
+- `defaultInfo({ files: [...] })` now takes `Artifact[]`, so pass bound Artifacts directly.
 
 ## What did **not** change
 
@@ -269,10 +269,10 @@ export const my_compiler = Rules.rule({
         return {
             kind: "MyResult",
             artifact: bound,
-            defaultInfo: Rules.defaultInfo({ files: [Rules.getFile(bound)] })
+            defaultInfo: Rules.defaultInfo({ files: [bound] })
         };
     }
 });
 ```
 
-The mechanical edits: `declareFile` → `declareOutput`; `Artifact.output(out.path)` → `Rules.cmdOutput(out)`; `Artifact.input(s)` → `Rules.cmdInput(s)`; destructure `Actions.run`'s return and use the bound result downstream; `srcs: File[]` → `srcs: SourceArtifact[]`; `defaultInfo` files via `Rules.getFile(bound)`.
+The mechanical edits: `declareFile` → `declareOutput`; `Artifact.output(out.path)` → `Rules.cmdOutput(out)`; `Artifact.input(s)` → `Rules.cmdInput(s)`; destructure `Actions.run`'s return and use the bound result downstream; `srcs: File[]` → `srcs: SourceArtifact[]`; `defaultInfo` now carries the bound `Artifact` directly.

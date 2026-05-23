@@ -60,7 +60,7 @@ const execBin = Rules.rule<ExecAttrs, ExecAttrs, Rules.Toolchain, ExecResult>({
 
         return {
             kind: "DefaultInfo",
-            files: [Rules.getFile(bBuild)],            // build-time only
+            files: [bBuild],                           // build-time only
             binaryInfo: Rules.binaryInfo({
                 name: ctx.args.name,
                 binary: bBuild,

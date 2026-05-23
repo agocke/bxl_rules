@@ -47,7 +47,7 @@ const writeOne = Rules.rule<WriteOneAttrs, WriteOneAttrs, Rules.Toolchain, Write
 
         return {
             kind: "DefaultInfo",
-            files: [Rules.getFile(bound)],
+            files: [bound],
             written: bound,
         };
     },
@@ -78,6 +78,8 @@ function test_actions_declareOutput_andWriteFile_throughRule(): string {
         "bound Artifact must carry a boundFile");
     Contract.assert(result.files.length === 1,
         "DefaultInfo.files should have exactly one entry");
+    Contract.assert(result.files[0].kind === "bound",
+        "DefaultInfo.files[0] should carry the bound Artifact");
 
     return "ok";
 }
