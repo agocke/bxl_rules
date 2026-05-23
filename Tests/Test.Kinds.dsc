@@ -72,7 +72,7 @@ const fakeTest = Rules.rule<FakeTestAttrs, FakeTestAttrs, Rules.Toolchain, FakeT
         });
         return {
             kind: "DefaultInfo",
-            files: [Rules.getFile(bExe)],          // build-time only
+            files: [bExe],                         // build-time only
             testInfo: info,
         };
     },
@@ -109,7 +109,7 @@ const fakeBin = Rules.rule<FakeBinAttrs, FakeBinAttrs, Rules.Toolchain, FakeBinR
 
         return {
             kind: "DefaultInfo",
-            files: [Rules.getFile(bBin)],          // build-time only
+            files: [bBin],                         // build-time only
             binaryInfo: Rules.binaryInfo({
                 name: ctx.args.name,
                 binary: bBin,
@@ -134,7 +134,7 @@ const fakeLib = Rules.rule<FakeLibAttrs, FakeLibAttrs, Rules.Toolchain, Rules.De
         const bOut = ctx.actions.writeFile(out, ["fake library"]);
         return {
             kind: "DefaultInfo",
-            files: [Rules.getFile(bOut)],
+            files: [bOut],
         };
     },
     resolve: (attrs, _r) => attrs,
@@ -243,7 +243,7 @@ function test_binary_defaultInfoExcludesRunScript(): string {
     const r = fakeBin({ name: "kinds-b-split" });
     Contract.assert(r.files.length === 1,
         `binary DefaultInfo.files must contain only the build-time binary; got ${r.files.length} files`);
-    const onlyFile = r.files[0];
+    const onlyFile = Rules.getFile(r.files[0]);
     const expectedSuffix = "kinds-b-split.exe";
     Contract.assert(onlyFile.path.toDiagnosticString().endsWith(expectedSuffix),
         `DefaultInfo.files[0] must be the compiled binary ending in "${expectedSuffix}"; got "${onlyFile.path.toDiagnosticString()}"`);
@@ -260,7 +260,7 @@ function test_test_defaultInfoExcludesStampAndRunat(): string {
     const r = fakeTest({ name: "kinds-t-split" });
     Contract.assert(r.files.length === 1,
         `test DefaultInfo.files must contain only the build-time test exe; got ${r.files.length} files`);
-    const onlyFile = r.files[0];
+    const onlyFile = Rules.getFile(r.files[0]);
     const expectedSuffix = "kinds-t-split.test.exe";
     Contract.assert(onlyFile.path.toDiagnosticString().endsWith(expectedSuffix),
         `DefaultInfo.files[0] must be the compiled test exe ending in "${expectedSuffix}"; got "${onlyFile.path.toDiagnosticString()}"`);

@@ -689,10 +689,10 @@ export function test_suite(args: TestSuiteArguments): TestSuiteResult {
     // Pull every test's stamp + runat into defaultInfo so requesting
     // the suite via `bxl /f:value='<suite>'` schedules the underlying
     // test pips. The manifest itself is listed first.
-    let files: File[] = [getFile(manifestArt)];
+    let files: Artifact[] = [manifestArt];
     for (let t of args.tests) {
-        files = files.push(getFile(t.stamp));
-        files = files.push(getFile(t.runat));
+        files = files.push(t.stamp);
+        files = files.push(t.runat);
     }
 
     return {

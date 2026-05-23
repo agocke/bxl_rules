@@ -141,7 +141,7 @@ export const my_compiler = Rules.rule<MyAttrs, MyResolved, MyToolchain, MyResult
         return {
             kind: "MyResult",
             artifact: boundOut,
-            defaultInfo: Rules.defaultInfo({ files: [Rules.getFile(boundOut)] })
+            defaultInfo: Rules.defaultInfo({ files: [boundOut] })
         };
     }
 });
@@ -159,7 +159,7 @@ A **provider** is a typed data structure that a rule returns. It carries outputs
 // Define your provider
 interface MyInfo extends Rules.Provider {
     kind: "MyInfo";      // discriminator tag (required)
-    binary: File;        // your outputs
+    binary: Rules.Artifact; // your outputs
     deps: MyInfo[];      // for transitive dependency walking
 }
 ```
@@ -169,11 +169,11 @@ Every rule should include a `DefaultInfo` — the universal provider that carrie
 ```typescript
 return {
     kind: "MyInfo",
-    binary: outputFile,
+    binary: outputArtifact,
     deps: [],
     defaultInfo: Rules.defaultInfo({
-        files: [outputFile],                    // default outputs
-        runfiles: [outputFile, ...runtimeDeps]  // files needed at runtime
+        files: [outputArtifact],                        // default outputs
+        runfiles: [outputArtifact, ...runtimeDeps]     // artifacts needed at runtime
     })
 };
 ```
@@ -468,7 +468,7 @@ const my_test = Rules.rule<MyAttrs, MyResolved, MyToolchain, MyResult>({
         // `bxl-kind:test`; only scheduled when explicitly requested).
         ctx.runActions.run({ tool: tc.runner, arguments: [...], outputs: [stamp, runat] });
 
-        return { kind: "DefaultInfo", files: [Rules.getFile(bExe)], testInfo: ... };
+        return { kind: "DefaultInfo", files: [bExe], testInfo: ... };
     },
     resolve: (attrs, _r) => attrs,
     toolchain: noopToolchain,
@@ -508,7 +508,7 @@ ctx.runActions.run({ tool: tc.runner, arguments: [...], outputs: [stamp, runat] 
 
 return {
     kind: "DefaultInfo",
-    files: [Rules.getFile(bExe)],            // ⚠ build-time only; no stamp/runat
+    files: [bExe],                           // ⚠ build-time only; no stamp/runat
     testInfo: Rules.testInfo({
         name:  ctx.args.name,
         stamp: stamp,                        // bound Artifact — empty success marker (run-time)
@@ -530,7 +530,7 @@ const bShim = ctx.runActions.writeFile(shim,
 
 return {
     kind: "DefaultInfo",
-    files: [Rules.getFile(bBin)],            // ⚠ build-time only; no runScript
+    files: [bBin],                           // ⚠ build-time only; no runScript
     binaryInfo: Rules.binaryInfo({
         name:      ctx.args.name,
         binary:    bBin,                     // build-time output

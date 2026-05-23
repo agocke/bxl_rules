@@ -47,11 +47,11 @@ export interface Provider {
  */
 @@public
 export interface DefaultInfo extends Provider {
-    /** The default output files of the rule. */
-    files: File[];
+    /** The default output artifacts of the rule. */
+    files: Artifact[];
 
-    /** Files needed at runtime (Bazel's "runfiles"). */
-    runfiles?: File[];
+    /** Artifacts needed at runtime (Bazel's "runfiles"). */
+    runfiles?: Artifact[];
 }
 
 /**
@@ -59,8 +59,8 @@ export interface DefaultInfo extends Provider {
  */
 @@public
 export function defaultInfo(args: {
-    files: File[],
-    runfiles?: File[],
+    files: Artifact[],
+    runfiles?: Artifact[],
 }): DefaultInfo {
     return {
         kind: "DefaultInfo",
