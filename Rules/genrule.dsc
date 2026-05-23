@@ -310,7 +310,7 @@ export interface FilegroupResult {
 export function filegroup(args: FilegroupArguments): FilegroupResult {
     return {
         srcs: args.srcs,
-        defaultInfo: defaultInfo({ files: args.srcs.map(s => <Artifact>s) }),
+        defaultInfo: defaultInfo({ files: args.srcs }),
     };
 }
 
