@@ -646,16 +646,14 @@ export function binaryInfo(args: {
 }
 
 /**
- * Expand a `BinaryInfo` into the full set of input files a downstream
- * pip needs to invoke the binary correctly.
+ * Expand a `BinaryInfo` into the full set of input artifacts a
+ * downstream pip needs to invoke the binary correctly.
  *
- * Returns `[runScript, binary, ...runfiles]` as resolved `File`s — the
- * shim itself (so its content is tracked), the binary the shim execs
- * (in case its absolute path is baked in), and every runfile the shim
- * dereferences at runtime (e.g. a .NET runtimeconfig.json).
+ * Returns `[runScript, binary, ...runfiles]` — the shim itself, the
+ * binary it execs, and every runfile the shim dereferences at runtime
+ * (e.g. a .NET runtimeconfig.json).
  *
- * Designed for splatting into `Rules.genrule({ deps: [...] })` (which
- * accepts `Transformer.InputArtifact[]`; `File[]` is a valid subset).
+ * Designed for splatting into `Rules.genrule({ deps: [...] })`.
  *
  * Example:
  *   Rules.genrule({
@@ -670,12 +668,11 @@ export function binaryInfo(args: {
  *   });
  */
 @@public
-export function runfilesOf(info: BinaryInfo): File[] {
+export function runfilesOf(info: BinaryInfo): Artifact[] {
     Contract.requires(info !== undefined, "runfilesOf: info must not be undefined");
     Contract.requires(info.kind === "BinaryInfo",
         `runfilesOf: expected BinaryInfo, got "${info.kind}"`);
-    const runfiles = info.runfiles.map(getFile);
-    return [getFile(info.runScript), getFile(info.binary), ...runfiles];
+    return [info.runScript, info.binary, ...info.runfiles];
 }
 
 // ============================================================================
