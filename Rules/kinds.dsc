@@ -589,6 +589,29 @@ export interface BinaryInfo extends Provider {
      * `bxl /f:~(tag='bxl-kind:binary')…` build filter.
      */
     runScript: Artifact;
+
+    /**
+     * Sibling files the run-shim dereferences at runtime — e.g. a
+     * .NET `runtimeconfig.json`, a Python wheel, a config blob the
+     * shim's hardcoded paths point at. Bazel's analog is the target's
+     * "runfiles tree" merged into `FilesToRunProvider`.
+     *
+     * The shim itself is tracked when its consumer references it via
+     * `getFile(runScript)`, but bxl can't infer the shim's internal
+     * file references. Callers that schedule a pip invoking the
+     * binary (e.g. `Rules.genrule` with `tool: { exe: /bin/sh }`)
+     * should depend on these so the build graph is complete and
+     * cache invalidation is correct.
+     *
+     * Use `Rules.runfilesOf(info)` to expand a `BinaryInfo` into the
+     * full `Transformer.InputArtifact[]` set (run-script + binary +
+     * runfiles) suitable for splatting into `genrule({ deps: [...] })`.
+     *
+     * Always present; empty when the binary needs no auxiliary files
+     * (mirrors Bazel's `DefaultInfo.default_runfiles`, which is always
+     * a `runfiles()` object — possibly empty — never absent).
+     */
+    runfiles: Artifact[];
 }
 
 /**
@@ -599,6 +622,7 @@ export function binaryInfo(args: {
     name: string,
     binary: Artifact,
     runScript: Artifact,
+    runfiles?: Artifact[],
 }): BinaryInfo {
     Contract.requires(args.binary !== undefined, "binaryInfo: binary must not be undefined");
     Contract.requires(args.binary.kind !== "unbound",
@@ -606,12 +630,52 @@ export function binaryInfo(args: {
     Contract.requires(args.runScript !== undefined, "binaryInfo: runScript must not be undefined");
     Contract.requires(args.runScript.kind !== "unbound",
         `binaryInfo: runScript Artifact must be bound (kind !== "unbound"); got "${args.runScript.kind}"`);
+    const runfiles = args.runfiles || [];
+    for (const rf of runfiles) {
+        Contract.requires(rf !== undefined, "binaryInfo: runfiles entries must not be undefined");
+        Contract.requires(rf.kind !== "unbound",
+            `binaryInfo: runfiles Artifacts must be bound (kind !== "unbound"); got "${rf.kind}"`);
+    }
     return {
         kind: "BinaryInfo",
         name: args.name,
         binary: args.binary,
         runScript: args.runScript,
+        runfiles: runfiles,
     };
+}
+
+/**
+ * Expand a `BinaryInfo` into the full set of input files a downstream
+ * pip needs to invoke the binary correctly.
+ *
+ * Returns `[runScript, binary, ...runfiles]` as resolved `File`s — the
+ * shim itself (so its content is tracked), the binary the shim execs
+ * (in case its absolute path is baked in), and every runfile the shim
+ * dereferences at runtime (e.g. a .NET runtimeconfig.json).
+ *
+ * Designed for splatting into `Rules.genrule({ deps: [...] })` (which
+ * accepts `Transformer.InputArtifact[]`; `File[]` is a valid subset).
+ *
+ * Example:
+ *   Rules.genrule({
+ *       name: "regen",
+ *       tool: { exe: f`/bin/sh` },
+ *       deps: [...Rules.runfilesOf(generator.binaryInfo), dotnetSdk],
+ *       outs: [a`out.txt`],
+ *       cmd: (ctx) => [
+ *           Cmd.argument(Rules.cmdInput(generator.binaryInfo.runScript)),
+ *           Cmd.option("--out=", Rules.cmdOutput(ctx.outs[0])),
+ *       ],
+ *   });
+ */
+@@public
+export function runfilesOf(info: BinaryInfo): File[] {
+    Contract.requires(info !== undefined, "runfilesOf: info must not be undefined");
+    Contract.requires(info.kind === "BinaryInfo",
+        `runfilesOf: expected BinaryInfo, got "${info.kind}"`);
+    const runfiles = info.runfiles.map(getFile);
+    return [getFile(info.runScript), getFile(info.binary), ...runfiles];
 }
 
 // ============================================================================
