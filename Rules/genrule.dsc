@@ -199,7 +199,7 @@ export interface GenruleArguments {
     cmd: (ctx: GenruleCmdContext) => Argument[];
 
     /** Additional input dependencies not listed in `srcs`. */
-    deps?: Transformer.InputArtifact[];
+    deps?: Artifact[];
 
     /** Extra output directories (opaque). */
     outDirs?: Directory[];
@@ -260,7 +260,7 @@ export function genrule(args: GenruleArguments): GenruleResult {
         workingDirectory: d`${outDir}`,
         dependencies: [
             ...srcs.map(s => s.file),
-            ...(args.deps || []),
+            ...(args.deps || []).map(getInputArtifact),
         ],
         implicitOutputs: declaredOuts.map(a => a.path),
         environmentVariables: args.env,
