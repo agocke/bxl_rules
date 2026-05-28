@@ -287,32 +287,57 @@ export interface FilegroupArguments {
     /** Rule name — for diagnostics. */
     name: string;
 
-    /** Files to include in the group. */
-    srcs: SourceArtifact[];
+    /** Source file labels to include in the group. */
+    srcs: Label[];
+}
+
+interface FilegroupResolved {
+    name: string;
+    srcs: Artifact[];
 }
 
 @@public
-export interface FilegroupResult {
-    /** The grouped artifacts. */
-    srcs: SourceArtifact[];
+export interface FilegroupResult extends Provider {
+    /** The resolved source artifacts. */
+    srcs: Artifact[];
 
     /** Standard rule output info for composition with other rules. */
     defaultInfo: DefaultInfo;
 }
 
 /**
- * Group files under a logical name.
+ * Group source files under a logical name.
  *
- * Equivalent to Bazel's `filegroup`.  Provides a named handle that
- * other rules can depend on without knowing the individual paths.
+ * Equivalent to Bazel's `filegroup` / `exports_files`.  Provides a
+ * named handle that other rules can depend on without knowing the
+ * individual paths — and without bypassing label resolution.
+ *
+ * Usage:
+ *   // Owning package
+ *   export const shared = Rules.filegroup({
+ *       name: "shared_srcs",
+ *       srcs: ["Foo.cs", "Bar.cs"],
+ *   });
+ *
+ *   // Consuming package (via import or implicitProjectReferences)
+ *   const lib = toolchain.csharp_library({
+ *       name: "Lib",
+ *       srcs: ["Main.cs", ...shared.srcs],
+ *   });
  */
 @@public
-export function filegroup(args: FilegroupArguments): FilegroupResult {
-    return {
-        srcs: args.srcs,
-        defaultInfo: defaultInfo({ files: args.srcs }),
-    };
-}
+export const filegroup = rule<FilegroupArguments, FilegroupResolved, Toolchain, FilegroupResult>({
+    doc: "Group source files under a logical name.",
+    resolve: (attrs: FilegroupArguments, resolver: LabelResolver) => ({
+        name: attrs.name,
+        srcs: resolver.resolveAll(attrs.srcs),
+    }),
+    impl: (ctx: RuleContext<FilegroupResolved, Toolchain>) => ({
+        kind: "FilegroupResult",
+        srcs: ctx.args.srcs,
+        defaultInfo: defaultInfo({ files: ctx.args.srcs }),
+    }),
+});
 
 // ============================================================================
 //  copy_file / copy_files
