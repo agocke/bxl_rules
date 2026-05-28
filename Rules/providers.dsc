@@ -613,14 +613,13 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
  * Label formats:
  *   "BasicTest.cs"                     — local file in current package
  *   ":BasicTest.cs"                    — explicit local file reference
- *   "//path/to/pkg:filename"           — workspace-relative file reference
  *   "@pkg//dir:file"                   — external package reference
  *   <Artifact>                         — generated output, passed through
  *
- * Resolution of string forms is purely mechanical — labels encode paths
- * directly:
- *   "//artifacts/bin/System.Runtime/ref/Release/net11.0:System.Runtime.dll"
- *   → {workspace_root}/artifacts/bin/System.Runtime/ref/Release/net11.0/System.Runtime.dll
+ * Cross-package file references (`"//path/to/pkg:file"`) are not
+ * supported. To share source files across packages, declare a
+ * `filegroup` in the owning package and pass its resolved artifacts
+ * to downstream rules.
  *
  * An `Artifact` (e.g. the result of `sourceArtifact(file)` or an
  * unbound output handle) may also be used directly. The framework
@@ -638,12 +637,14 @@ export type Label = string | Artifact;
 /**
  * Resolve a label to an Artifact. Internal — only accessible via LabelResolver.
  *
- * Supports five label forms:
+ * Supports four label forms:
  *   <Artifact>             — pass-through (generated outputs)
  *   "@pkg//dir:file"       — external package (StaticDirectory.assertExistence)
- *   "//pkg:file"           — workspace-relative
  *   ":file"                — current-directory-relative
  *   "file"                 — bare name (current directory)
+ *
+ * Workspace-relative labels ("//pkg:file") are rejected — use a
+ * filegroup in the owning package instead.
  */
 function resolveLabel(label: Label, currentDir: Directory, externalPkgs: Map<string, StaticDirectory>): Artifact {
     // Artifact pass-through (generated outputs from other actions, or
@@ -674,17 +675,14 @@ function resolveLabel(label: Label, currentDir: Directory, externalPkgs: Map<str
         return sourceArtifact(pkg.assertExistence(r`${file}`));
     }
 
-    // //path/to/pkg:filename — workspace-relative
+    // //path/to/pkg:filename — workspace-relative: REJECTED.
+    // Cross-package file references must go through a filegroup target
+    // in the owning package, mirroring Bazel's package visibility model.
     if (labelStr.startsWith("//")) {
-        const rest = labelStr.slice(2);
-        const colonIdx = rest.indexOf(":");
-        if (colonIdx >= 0) {
-            const pkg = rest.slice(0, colonIdx);
-            const target = rest.slice(colonIdx + 1);
-            return sourceArtifact(f`${workspaceRoot}/${pkg}/${target}`);
-        }
-        // //path/to/file (no colon — entire thing is a path)
-        return sourceArtifact(f`${workspaceRoot}/${rest}`);
+        Contract.fail(
+            `Cross-package label '${labelStr}' is not allowed. ` +
+            `Export the file via a filegroup in the owning package and ` +
+            `reference the filegroup's artifacts instead.`);
     }
 
     // :filename — local reference
