@@ -328,11 +328,11 @@ export interface FilegroupResult extends Provider {
 @@public
 export const filegroup = rule<FilegroupArguments, FilegroupResolved, Toolchain, FilegroupResult>({
     doc: "Group source files under a logical name.",
-    resolve: (attrs, resolver) => ({
+    resolve: (attrs: FilegroupArguments, resolver: LabelResolver) => ({
         name: attrs.name,
         srcs: resolver.resolveAll(attrs.srcs),
     }),
-    impl: (ctx) => ({
+    impl: (ctx: RuleContext<FilegroupResolved, Toolchain>) => ({
         kind: "FilegroupResult",
         srcs: ctx.args.srcs,
         defaultInfo: defaultInfo({ files: ctx.args.srcs }),
