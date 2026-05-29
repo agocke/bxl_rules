@@ -61,12 +61,6 @@ export interface NativeTestArguments {
     tags?: string[];
 }
 
-@@public
-export interface NativeTestResult extends Provider {
-    testInfo: TestInfo;
-    defaultInfo: DefaultInfo;
-}
-
 /**
  * Run an arbitrary executable as a test.
  *
@@ -76,16 +70,19 @@ export interface NativeTestResult extends Provider {
  * (auto-tagged `bxl-kind:test`); `DefaultInfo.files` is empty so a
  * plain `bxl` build compiles but does not execute the test.
  *
+ * Returns a `Target` containing `TestInfo` and `DefaultInfo` providers.
+ *
  * Usage:
- *   const result = Rules.native_test({
+ *   const t = Rules.native_test({
  *       name: "my_test",
  *       src: Rules.sourceArtifact(f`test_binary`),
  *       successExitCodes: [0],
  *   });
+ *   const ti = Rules.getProvider<Rules.TestInfo>(t, "TestInfo");
  */
 @@public
-export function native_test(args: NativeTestArguments): NativeTestResult {
-    const t = rule<NativeTestArguments, NativeTestArguments, Toolchain>({
+export function native_test(args: NativeTestArguments): Target {
+    return rule<NativeTestArguments, NativeTestArguments, Toolchain>({
         doc: `native_test: ${args.name}`,
         kind: "test",
         resolve: (attrs, _resolver) => attrs,
@@ -102,16 +99,11 @@ export function native_test(args: NativeTestArguments): NativeTestResult {
             }), ctx.runActions);
 
             return [
-                <NativeTestResult>{
-                    kind: "NativeTestResult",
-                    testInfo: ti,
-                    defaultInfo: defaultInfo({ files: [] }),
-                },
+                ti,
+                defaultInfo({ files: [] }),
             ];
         },
     })(args);
-
-    return getProvider<NativeTestResult>(t, "NativeTestResult");
 }
 
 /**
@@ -303,21 +295,15 @@ export interface WriteFileArguments {
     content: string[];
 }
 
-@@public
-export interface WriteFileResult extends Provider {
-    /** The generated output artifact. */
-    out: Artifact;
-
-    /** Standard rule output info. */
-    defaultInfo: DefaultInfo;
-}
-
 /**
  * Generate a text file from a list of lines.
  *
  * Equivalent to bazel-skylib's `write_file` rule.  The file is produced
  * as a build action, so its content can include computed values and the
  * output flows through the provider/label system like any other artifact.
+ *
+ * Returns a `Target` containing a `DefaultInfo` provider whose `files[0]`
+ * is the generated output.
  *
  * Usage:
  *   const cfg = Rules.write_file({
@@ -328,8 +314,8 @@ export interface WriteFileResult extends Provider {
  *           "build_property.Foo = bar",
  *       ],
  *   });
- *   const result = Rules.getProvider<Rules.WriteFileResult>(cfg, "WriteFileResult");
- *   // result.out is a bound Artifact
+ *   const info = Rules.getProvider<Rules.DefaultInfo>(cfg, "DefaultInfo");
+ *   // info.files[0] is the generated file
  */
 @@public
 export const write_file = rule<WriteFileArguments, WriteFileArguments, Toolchain>({
@@ -339,11 +325,7 @@ export const write_file = rule<WriteFileArguments, WriteFileArguments, Toolchain
         const output = ctx.actions.declareOutput(ctx.args.out);
         const bound = ctx.actions.writeFile(output, ctx.args.content);
         return [
-            <WriteFileResult>{
-                kind: "WriteFileResult",
-                out: bound,
-                defaultInfo: defaultInfo({ files: [bound] }),
-            },
+            defaultInfo({ files: [bound] }),
         ];
     },
 });
@@ -366,21 +348,15 @@ interface FilegroupResolved {
     srcs: Artifact[];
 }
 
-@@public
-export interface FilegroupResult extends Provider {
-    /** The resolved source artifacts. */
-    srcs: Artifact[];
-
-    /** Standard rule output info for composition with other rules. */
-    defaultInfo: DefaultInfo;
-}
-
 /**
  * Group source files under a logical name.
  *
  * Equivalent to Bazel's `filegroup` / `exports_files`.  Provides a
  * named handle that other rules can depend on without knowing the
  * individual paths — and without bypassing label resolution.
+ *
+ * Returns a `Target` containing a `DefaultInfo` provider whose `files`
+ * are the resolved source artifacts.
  *
  * Usage:
  *   // Owning package
@@ -390,9 +366,10 @@ export interface FilegroupResult extends Provider {
  *   });
  *
  *   // Consuming package (via import or implicitProjectReferences)
+ *   const info = Rules.getProvider<Rules.DefaultInfo>(shared, "DefaultInfo");
  *   const lib = toolchain.csharp_library({
  *       name: "Lib",
- *       srcs: ["Main.cs", ...shared.srcs],
+ *       srcs: ["Main.cs", ...info.files],
  *   });
  */
 @@public
@@ -403,11 +380,7 @@ export const filegroup = rule<FilegroupArguments, FilegroupResolved, Toolchain>(
         srcs: resolver.resolveAll(attrs.srcs),
     }),
     impl: (ctx: RuleContext<FilegroupResolved, Toolchain>) => [
-        <FilegroupResult>{
-            kind: "FilegroupResult",
-            srcs: ctx.args.srcs,
-            defaultInfo: defaultInfo({ files: ctx.args.srcs }),
-        },
+        defaultInfo({ files: ctx.args.srcs }),
     ],
 });
 
