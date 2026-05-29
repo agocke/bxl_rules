@@ -37,36 +37,25 @@ interface ExecAttrs {
     name: string;
 }
 
-interface ExecResult extends Rules.DefaultInfo {
-    binaryInfo: Rules.BinaryInfo;
-}
-
-const execBin = Rules.rule<ExecAttrs, ExecAttrs, Rules.Toolchain, ExecResult>({
+const execBin = Rules.rule<ExecAttrs, ExecAttrs, Rules.Toolchain>({
     kind: "binary",
     impl: (ctx) => {
-        // Build-time: write a small payload.
         const buildOut = ctx.actions.declareOutput("build.txt");
         const bBuild = ctx.actions.writeFile(buildOut, ["BUILD-RAN"]);
 
         Contract.assert(ctx.runActions !== undefined,
             "kind: \"binary\" must receive ctx.runActions");
-        // Run-time: copyFile(bBuild, ...) — the copy pip CONSUMES bBuild,
-        // creating a real dependency edge from the run pip to the build
-        // pip. This matters because BuildXL's tag-selection filter pulls
-        // in transitive dependencies of the selected pip, mirroring
-        // `bazel run` (which builds the binary as part of "run").
         const runOut = ctx.runActions.declareOutput("run.txt");
         const bRun = ctx.runActions.copyFile(bBuild, runOut);
 
-        return {
-            kind: "DefaultInfo",
-            files: [bBuild],                           // build-time only
-            binaryInfo: Rules.binaryInfo({
+        return [
+            Rules.defaultInfo({ files: [bBuild] }),
+            Rules.binaryInfo({
                 name: ctx.args.name,
                 binary: bBuild,
-                runScript: bRun,                       // run-time, deferred
+                runScript: bRun,
             }),
-        };
+        ];
     },
     resolve: (a, _r) => a,
     toolchain: noopToolchain,

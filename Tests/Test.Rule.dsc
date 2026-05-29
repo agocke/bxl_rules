@@ -35,7 +35,7 @@ interface WriteOneResult extends Rules.DefaultInfo {
     written: Rules.Artifact;
 }
 
-const writeOne = Rules.rule<WriteOneAttrs, WriteOneAttrs, Rules.Toolchain, WriteOneResult>({
+const writeOne = Rules.rule<WriteOneAttrs, WriteOneAttrs, Rules.Toolchain>({
     impl: (ctx) => {
         const declared = ctx.actions.declareOutput(ctx.args.outName);
         Contract.assert(declared.kind === "unbound",
@@ -45,11 +45,14 @@ const writeOne = Rules.rule<WriteOneAttrs, WriteOneAttrs, Rules.Toolchain, Write
         Contract.assert(bound.kind === "bound",
             `writeFile must return a bound Artifact; got "${bound.kind}"`);
 
-        return {
-            kind: "DefaultInfo",
-            files: [bound],
-            written: bound,
-        };
+        return [
+            <WriteOneResult>{
+                kind: "WriteOneResult",
+                files: [bound],
+                written: bound,
+            },
+            Rules.defaultInfo({ files: [bound] }),
+        ];
     },
     resolve: (attrs, _resolver) => attrs,
     toolchain: noopToolchain,
@@ -60,14 +63,17 @@ const writeOne = Rules.rule<WriteOneAttrs, WriteOneAttrs, Rules.Toolchain, Write
 // ----------------------------------------------------------------------------
 
 function test_actions_declareOutput_andWriteFile_throughRule(): string {
-    const result = writeOne({
+    const t = writeOne({
         name: "test-rule-write-one",
         lines: ["hello", "world"],
         outName: "greeting.txt",
     });
 
+    Contract.assert(t !== undefined,
+        "rule invocation must return a target");
+    const result = Rules.getProvider<WriteOneResult>(t, "WriteOneResult");
     Contract.assert(result !== undefined,
-        "rule invocation must return a result");
+        "target must contain WriteOneResult provider");
     Contract.assert(result.written !== undefined,
         "rule must surface a bound output Artifact");
     Contract.assert(result.written.kind === "bound",
@@ -76,9 +82,13 @@ function test_actions_declareOutput_andWriteFile_throughRule(): string {
         `shortPath should mirror the declareOutput name; got "${result.written.shortPath}"`);
     Contract.assert(result.written.boundFile !== undefined,
         "bound Artifact must carry a boundFile");
-    Contract.assert(result.files.length === 1,
+
+    const defaultInfo = Rules.getProvider<Rules.DefaultInfo>(t, "DefaultInfo");
+    Contract.assert(defaultInfo !== undefined,
+        "target must contain DefaultInfo provider");
+    Contract.assert(defaultInfo.files.length === 1,
         "DefaultInfo.files should have exactly one entry");
-    Contract.assert(result.files[0].kind === "bound",
+    Contract.assert(defaultInfo.files[0].kind === "bound",
         "DefaultInfo.files[0] should carry the bound Artifact");
 
     return "ok";
@@ -92,8 +102,11 @@ function test_actions_perTargetOutputIsolation(): string {
     // Two invocations of the same rule with distinct names must claim
     // disjoint output directories — declaring the same logical output
     // name in both must NOT collide on the same path.
-    const a = writeOne({ name: "iso-a", lines: ["a"], outName: "out.txt" });
-    const b = writeOne({ name: "iso-b", lines: ["b"], outName: "out.txt" });
+    const tA = writeOne({ name: "iso-a", lines: ["a"], outName: "out.txt" });
+    const tB = writeOne({ name: "iso-b", lines: ["b"], outName: "out.txt" });
+
+    const a = Rules.getProvider<WriteOneResult>(tA, "WriteOneResult");
+    const b = Rules.getProvider<WriteOneResult>(tB, "WriteOneResult");
 
     Contract.assert(a.written.shortPath === "out.txt", "rule a shortPath");
     Contract.assert(b.written.shortPath === "out.txt", "rule b shortPath");

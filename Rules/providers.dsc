@@ -212,6 +212,61 @@ export function depsetAll<T extends Provider>(roots: T[], getDeps: (item: T) => 
 
 
 // ============================================================================
+//  Target — multi-provider rule result (like Bazel's provider list)
+// ============================================================================
+
+/**
+ * A `Target` is the result of evaluating a rule — a map from provider
+ * `kind` tags to provider instances, analogous to Bazel's provider list.
+ *
+ * In Bazel, a rule's `implementation` function returns a list of
+ * providers (`[DefaultInfo(...), CcInfo(...), ...]`), and consumers
+ * query by provider key (`dep[CcInfo]`).  Here, `Target` is a
+ * `Map<string, Provider>` keyed by the `kind` discriminator, and
+ * consumers query with `getProvider(target, "CcInfo")`.
+ */
+@@public
+export type Target = Map<string, Provider>;
+
+/**
+ * Construct a `Target` from an array of providers.
+ *
+ * Each provider's `kind` becomes its key in the map.  Duplicate kinds
+ * are rejected at construction time.
+ *
+ * Example:
+ *   return Rules.target([
+ *       { kind: "DefaultInfo", files: [out] },
+ *       { kind: "CSharpCompileInfo", refs: [...] },
+ *   ]);
+ */
+@@public
+export function target(providers: Provider[]): Target {
+    let m = Map.empty<string, Provider>();
+    for (const p of providers) {
+        Contract.requires(!m.containsKey(p.kind),
+            `Duplicate provider kind "${p.kind}" in target; each provider must have a unique kind.`);
+        m = m.add(p.kind, p);
+    }
+    return m;
+}
+
+/**
+ * Extract a provider from a `Target` by its `kind` tag.
+ *
+ * Analogous to Bazel's `dep[ProviderKey]`.  Returns `undefined` if the
+ * target does not carry a provider with the requested kind.
+ *
+ *     const compile = Rules.getProvider<DotnetAssemblyCompileInfo>(
+ *         dep, "DotnetAssemblyCompileInfo");
+ */
+@@public
+export function getProvider<T extends Provider>(t: Target, kind: string): T {
+    return <T>t.get(kind);
+}
+
+
+// ============================================================================
 //  Toolchain — decouples rules from tool locations
 // ============================================================================
 
@@ -502,9 +557,13 @@ export interface LabelResolver {
 }
 
 @@public
-export interface RuleDefinition<TAttrs, TResolved, TToolchain extends Toolchain, TResult extends Provider> {
-    /** The implementation function. Receives resolved context. */
-    impl: (ctx: RuleContext<TResolved, TToolchain>) => TResult;
+export interface RuleDefinition<TAttrs, TResolved, TToolchain extends Toolchain> {
+    /**
+     * The implementation function. Receives resolved context, returns
+     * an array of providers (like Bazel's `return [DefaultInfo(...), ...]`).
+     * The framework wraps the array into a `Target` map.
+     */
+    impl: (ctx: RuleContext<TResolved, TToolchain>) => Provider[];
 
     /**
      * Resolve caller attrs to impl attrs.
@@ -577,14 +636,17 @@ export interface RuleDefinition<TAttrs, TResolved, TToolchain extends Toolchain,
  * resolved attrs. Neither resolve nor impl can access the raw
  * resolveLabel function — it's fully encapsulated.
  *
+ * The impl returns `Provider[]` (like Bazel), and the framework
+ * wraps it into a `Target` map keyed by provider `kind`.
+ *
  * If `externalPackages` is provided in the definition, labels of
  * the form `@pkg//path:file` are resolved against the corresponding
  * StaticDirectory via `assertExistence`.
  */
 @@public
-export function rule<TAttrs extends { name: string }, TResolved, TToolchain extends Toolchain, TResult extends Provider>(
-    defn: RuleDefinition<TAttrs, TResolved, TToolchain, TResult>
-): (args: TAttrs) => TResult {
+export function rule<TAttrs extends { name: string }, TResolved, TToolchain extends Toolchain>(
+    defn: RuleDefinition<TAttrs, TResolved, TToolchain>
+): (args: TAttrs) => Target {
     return (args: TAttrs) => {
         const currentDir = d`${Context.getLastActiveUsePath().parent}`;
         const extPkgs = defn.externalPackages || Map.empty<string, StaticDirectory>();
@@ -594,12 +656,13 @@ export function rule<TAttrs extends { name: string }, TResolved, TToolchain exte
         };
         const resolved = defn.resolve(args, resolver);
         const rt = createActionsForRule(args.name, defn.kind);
-        return defn.impl({
+        const providers = defn.impl({
             args: resolved,
             toolchain: defn.toolchain,
             actions: rt.actions,
             runActions: rt.runActions,
         });
+        return target(providers);
     };
 }
 
