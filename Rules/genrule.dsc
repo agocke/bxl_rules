@@ -85,7 +85,7 @@ export interface NativeTestResult extends Provider {
  */
 @@public
 export function native_test(args: NativeTestArguments): NativeTestResult {
-    const result = rule<NativeTestArguments, NativeTestArguments, Toolchain, NativeTestResult>({
+    const t = rule<NativeTestArguments, NativeTestArguments, Toolchain>({
         doc: `native_test: ${args.name}`,
         kind: "test",
         resolve: (attrs, _resolver) => attrs,
@@ -101,15 +101,17 @@ export function native_test(args: NativeTestArguments): NativeTestResult {
                 tags: ctx.args.tags,
             }), ctx.runActions);
 
-            return {
-                kind: "NativeTestResult",
-                testInfo: ti,
-                defaultInfo: defaultInfo({ files: [] }),
-            };
+            return [
+                <NativeTestResult>{
+                    kind: "NativeTestResult",
+                    testInfo: ti,
+                    defaultInfo: defaultInfo({ files: [] }),
+                },
+            ];
         },
     })(args);
 
-    return result;
+    return getProvider<NativeTestResult>(t, "NativeTestResult");
 }
 
 /**
@@ -326,17 +328,19 @@ export interface FilegroupResult extends Provider {
  *   });
  */
 @@public
-export const filegroup = rule<FilegroupArguments, FilegroupResolved, Toolchain, FilegroupResult>({
+export const filegroup = rule<FilegroupArguments, FilegroupResolved, Toolchain>({
     doc: "Group source files under a logical name.",
     resolve: (attrs: FilegroupArguments, resolver: LabelResolver) => ({
         name: attrs.name,
         srcs: resolver.resolveAll(attrs.srcs),
     }),
-    impl: (ctx: RuleContext<FilegroupResolved, Toolchain>) => ({
-        kind: "FilegroupResult",
-        srcs: ctx.args.srcs,
-        defaultInfo: defaultInfo({ files: ctx.args.srcs }),
-    }),
+    impl: (ctx: RuleContext<FilegroupResolved, Toolchain>) => [
+        <FilegroupResult>{
+            kind: "FilegroupResult",
+            srcs: ctx.args.srcs,
+            defaultInfo: defaultInfo({ files: ctx.args.srcs }),
+        },
+    ],
 });
 
 // ============================================================================
