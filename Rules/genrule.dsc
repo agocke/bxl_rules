@@ -281,6 +281,74 @@ export function genrule(args: GenruleArguments): GenruleResult {
 }
 
 // ============================================================================
+//  write_file
+// ============================================================================
+
+/**
+ * Arguments for `write_file`.
+ *
+ * Analogous to bazel-skylib's `write_file` rule.  Produces a text file
+ * from a list of lines via `ctx.actions.writeFile`, returning the bound
+ * Artifact so it can flow through the label system.
+ */
+@@public
+export interface WriteFileArguments {
+    /** Rule name — used for output directory and diagnostics. */
+    name: string;
+
+    /** Output file name (leaf only — directory chosen automatically). */
+    out: string;
+
+    /** Lines of text to write. Joined with newlines by the framework. */
+    content: string[];
+}
+
+@@public
+export interface WriteFileResult extends Provider {
+    /** The generated output artifact. */
+    out: Artifact;
+
+    /** Standard rule output info. */
+    defaultInfo: DefaultInfo;
+}
+
+/**
+ * Generate a text file from a list of lines.
+ *
+ * Equivalent to bazel-skylib's `write_file` rule.  The file is produced
+ * as a build action, so its content can include computed values and the
+ * output flows through the provider/label system like any other artifact.
+ *
+ * Usage:
+ *   const cfg = Rules.write_file({
+ *       name: "my_config",
+ *       out: "app.globalconfig",
+ *       content: [
+ *           "is_global = true",
+ *           "build_property.Foo = bar",
+ *       ],
+ *   });
+ *   const result = Rules.getProvider<Rules.WriteFileResult>(cfg, "WriteFileResult");
+ *   // result.out is a bound Artifact
+ */
+@@public
+export const write_file = rule<WriteFileArguments, WriteFileArguments, Toolchain>({
+    doc: "Generate a text file from a list of lines.",
+    resolve: (attrs, _resolver) => attrs,
+    impl: (ctx) => {
+        const output = ctx.actions.declareOutput(ctx.args.out);
+        const bound = ctx.actions.writeFile(output, ctx.args.content);
+        return [
+            <WriteFileResult>{
+                kind: "WriteFileResult",
+                out: bound,
+                defaultInfo: defaultInfo({ files: [bound] }),
+            },
+        ];
+    },
+});
+
+// ============================================================================
 //  filegroup
 // ============================================================================
 
